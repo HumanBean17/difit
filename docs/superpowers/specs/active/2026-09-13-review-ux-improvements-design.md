@@ -1,6 +1,6 @@
 # Review UX Improvements: Focus Mode, Tree Tracking, General Comments, Java-Friendly Headers
 
-**Status:** draft
+**Status:** in_progress
 
 ## Motivation
 
