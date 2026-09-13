@@ -64,6 +64,9 @@ const SIDEBAR_OPEN_STORAGE_KEY = 'difit.sidebarOpen';
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 600;
 const SIDEBAR_DEFAULT_WIDTH = 280;
+// A file counts as active once its top edge reaches this far below the top of
+// the diff scroll container.
+const ACTIVE_FILE_SCROLL_OFFSET_PX = 60;
 
 const parseDiffViewMode = (value: unknown): DiffViewMode | null => {
   switch (value) {
@@ -146,6 +149,9 @@ function App() {
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const collapsedInitializedRef = useRef(false);
   const diffScrollContainerRef = useRef<HTMLElement | null>(null);
+  // The file the user is currently looking at, fed by the keyboard cursor,
+  // file-tree clicks, and the diff scroll position (scrollspy).
+  const [activeFileIndex, setActiveFileIndex] = useState<number | null>(null);
 
   // Revision selector state
   const [revisionOptions, setRevisionOptions] = useState<RevisionsResponse | null>(null);
@@ -442,6 +448,20 @@ function App() {
     setIsFileTreeOpen(false);
   }, []);
 
+  // File-tree clicks scroll the diff to the file and make it the active one.
+  const handleScrollToFile = useCallback(
+    (filePath: string) => {
+      scrollFileIntoDiffContainer(filePath);
+      if (diffData) {
+        const fileIndex = diffData.files.findIndex((file) => file.path === filePath);
+        if (fileIndex !== -1) {
+          setActiveFileIndex(fileIndex);
+        }
+      }
+    },
+    [diffData, scrollFileIntoDiffContainer],
+  );
+
   const handleDiffModeChange = useCallback((mode: DiffViewMode) => {
     setDiffMode(mode);
     try {
@@ -642,6 +662,71 @@ function App() {
       setCursorPosition(cursor);
     });
   }, [cursor, diffData, ensureFilesRenderedUpTo, renderedFilePaths, setCursorPosition]);
+
+  // Keyboard cursor moves drive the active file. Key on the file index (not
+  // the cursor object) so line-level cursor moves don't retrigger this.
+  const cursorFileIndex = cursor?.fileIndex ?? null;
+  useEffect(() => {
+    if (cursorFileIndex === null) return;
+    setActiveFileIndex(cursorFileIndex);
+  }, [cursorFileIndex]);
+
+  // A fresh diff invalidates the active file: keep a still-valid index,
+  // otherwise fall back to the first file (or null for an empty diff).
+  useEffect(() => {
+    const fileCount = diffData?.files.length ?? 0;
+    setActiveFileIndex((prev) =>
+      prev !== null && prev >= 0 && prev < fileCount ? prev : fileCount > 0 ? 0 : null,
+    );
+  }, [diffData]);
+
+  // Scrollspy toggle; Task 3 replaces this with `!isFocusMode` so the tree
+  // stops tracking scroll position while focus mode is active.
+  const isScrollspyEnabled = true;
+  useEffect(() => {
+    if (!isScrollspyEnabled) return;
+
+    const scrollContainer = diffScrollContainerRef.current;
+    if (!scrollContainer || !diffData || diffData.files.length === 0) return;
+
+    let frameId: number | null = null;
+    const handleScroll = () => {
+      if (frameId !== null) return;
+      frameId = requestAnimationFrame(() => {
+        frameId = null;
+        const activationLine =
+          scrollContainer.getBoundingClientRect().top + ACTIVE_FILE_SCROLL_OFFSET_PX;
+
+        const fileElements = new Map<string, HTMLElement>();
+        scrollContainer.querySelectorAll<HTMLElement>('[data-file-path]').forEach((element) => {
+          const filePath = element.dataset.filePath;
+          if (filePath) {
+            fileElements.set(filePath, element);
+          }
+        });
+
+        // The active file is the last one (in diffData.files order) whose top
+        // edge has reached the activation line; the first file if none has.
+        let lastReachedFileIndex: number | null = null;
+        diffData.files.forEach((file, fileIndex) => {
+          const element = fileElements.get(file.path);
+          if (element && element.getBoundingClientRect().top <= activationLine) {
+            lastReachedFileIndex = fileIndex;
+          }
+        });
+
+        setActiveFileIndex(lastReachedFileIndex ?? 0);
+      });
+    };
+
+    scrollContainer.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      scrollContainer.removeEventListener('scroll', handleScroll);
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+    };
+  }, [diffData, diffScrollContainerRef, isScrollspyEnabled]);
 
   const handleLineClick = useCallback(
     (fileIndex: number, chunkIndex: number, lineIndex: number, side: 'left' | 'right') => {
@@ -1427,13 +1512,13 @@ function App() {
               <div className="flex-1 overflow-y-auto">
                 <FileList
                   files={diffData.files}
-                  onScrollToFile={scrollFileIntoDiffContainer}
+                  onScrollToFile={handleScrollToFile}
                   onFileSelected={isMobile ? handleMobileFileSelected : undefined}
                   comments={normalizedThreads}
                   reviewedFiles={viewedFiles}
                   onToggleReviewed={toggleFileReviewed}
                   onToggleFolderReviewed={toggleFolderReviewed}
-                  selectedFileIndex={cursor?.fileIndex ?? null}
+                  selectedFileIndex={activeFileIndex}
                 />
               </div>
               {!isMobile && (

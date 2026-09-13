@@ -1048,6 +1048,124 @@ describe('App Component - Sidebar persistence', () => {
   });
 });
 
+describe('App Component - Active file scrollspy', () => {
+  const threeFileDiffResponse: DiffResponse = {
+    ...mockDiffResponse,
+    files: [
+      { path: 'file1.ts', status: 'modified', additions: 1, deletions: 1, chunks: [] },
+      { path: 'file2.ts', status: 'modified', additions: 1, deletions: 1, chunks: [] },
+      { path: 'file3.ts', status: 'modified', additions: 1, deletions: 1, chunks: [] },
+    ],
+  };
+
+  // The diff header also carries the path in its title attribute, so pick the
+  // titled element that belongs to a sidebar file row.
+  const getTreeFileRow = (path: string): HTMLElement => {
+    const row = screen
+      .getAllByTitle(path)
+      .map((element) => element.closest<HTMLElement>('[data-file-row="true"]'))
+      .find((element) => element !== null);
+    expect(row).toBeDefined();
+    return row as HTMLElement;
+  };
+
+  const getDiffScrollContainer = (): HTMLElement => {
+    const container = document.querySelector<HTMLElement>('main');
+    expect(container).not.toBeNull();
+    return container as HTMLElement;
+  };
+
+  const getDiffFileWrappers = (): HTMLElement[] => {
+    const wrappers = Array.from(
+      getDiffScrollContainer().querySelectorAll<HTMLElement>('[data-file-path]'),
+    );
+    expect(wrappers).toHaveLength(threeFileDiffResponse.files.length);
+    return wrappers;
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockComments = [];
+    mockConfirm.mockReturnValue(false);
+    mockFetch(threeFileDiffResponse);
+  });
+
+  it('marks the first file active before any scrolling happens', async () => {
+    renderApp();
+
+    await waitFor(() => {
+      expect(getTreeFileRow('file1.ts')).toHaveAttribute('data-active', 'true');
+    });
+    expect(getTreeFileRow('file2.ts')).not.toHaveAttribute('data-active');
+    expect(getTreeFileRow('file3.ts')).not.toHaveAttribute('data-active');
+  });
+
+  it('updates the active file from the diff scroll position', async () => {
+    renderApp();
+
+    await waitFor(() => {
+      expect(getTreeFileRow('file1.ts')).toHaveAttribute('data-active', 'true');
+    });
+
+    // File 1 is scrolled past, file 2 sits above the activation threshold,
+    // and file 3 is still below it, so file 2 should become active.
+    const wrapperTops = [-100, 20, 500];
+    getDiffFileWrappers().forEach((wrapper, index) => {
+      vi.spyOn(wrapper, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, wrapperTops[index], 800, 100),
+      );
+    });
+
+    fireEvent.scroll(getDiffScrollContainer());
+
+    await waitFor(() => {
+      expect(getTreeFileRow('file2.ts')).toHaveAttribute('data-active', 'true');
+    });
+    expect(getTreeFileRow('file1.ts')).not.toHaveAttribute('data-active');
+    expect(getTreeFileRow('file3.ts')).not.toHaveAttribute('data-active');
+  });
+
+  it('falls back to the first file when no file reaches the activation threshold', async () => {
+    renderApp();
+
+    await waitFor(() => {
+      expect(getTreeFileRow('file1.ts')).toHaveAttribute('data-active', 'true');
+    });
+
+    // Every file starts below the threshold line.
+    const wrapperTops = [500, 600, 700];
+    getDiffFileWrappers().forEach((wrapper, index) => {
+      vi.spyOn(wrapper, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, wrapperTops[index], 800, 100),
+      );
+    });
+
+    fireEvent.scroll(getDiffScrollContainer());
+
+    await waitFor(() => {
+      expect(getTreeFileRow('file1.ts')).toHaveAttribute('data-active', 'true');
+    });
+    expect(getTreeFileRow('file2.ts')).not.toHaveAttribute('data-active');
+    expect(getTreeFileRow('file3.ts')).not.toHaveAttribute('data-active');
+  });
+
+  it('marks the clicked file tree row active', async () => {
+    renderApp();
+
+    await waitFor(() => {
+      expect(getTreeFileRow('file1.ts')).toHaveAttribute('data-active', 'true');
+    });
+
+    fireEvent.click(getTreeFileRow('file3.ts'));
+
+    await waitFor(() => {
+      expect(getTreeFileRow('file3.ts')).toHaveAttribute('data-active', 'true');
+    });
+    expect(getTreeFileRow('file1.ts')).not.toHaveAttribute('data-active');
+    expect(getTreeFileRow('file2.ts')).not.toHaveAttribute('data-active');
+  });
+});
+
 describe('App Component - Mobile sidebar auto-close', () => {
   beforeEach(() => {
     vi.clearAllMocks();
