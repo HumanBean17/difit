@@ -1,6 +1,7 @@
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Copy,
   FileDiff,
@@ -15,12 +16,20 @@ import type { DiffFile } from '../../types/diff';
 import { copyTextToClipboard } from '../utils/clipboard';
 import { splitFilePath } from '../utils/filePath';
 
+export interface FocusNav {
+  position: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+}
+
 interface DiffViewerHeaderProps {
   file: DiffFile;
   isCollapsed: boolean;
   isFocused?: boolean;
   isReviewed: boolean;
   isChangedSinceViewed?: boolean;
+  focusNav?: FocusNav;
   onToggleCollapsed: (path: string) => void;
   onToggleAllCollapsed: (shouldCollapse: boolean) => void;
   onToggleReviewed: (path: string) => void;
@@ -45,6 +54,7 @@ export const DiffViewerHeader = ({
   isFocused = false,
   isReviewed,
   isChangedSinceViewed = false,
+  focusNav,
   onToggleCollapsed,
   onToggleAllCollapsed,
   onToggleReviewed,
@@ -126,6 +136,36 @@ export const DiffViewerHeader = ({
       </div>
 
       <div className="flex items-center gap-3">
+        {focusNav && (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={focusNav.onPrev}
+              disabled={focusNav.position <= 1}
+              className="p-1 rounded text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Previous file"
+              aria-label="Previous file"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span
+              className="text-xs text-github-text-secondary tabular-nums whitespace-nowrap"
+              aria-label="Focused file position"
+            >
+              {focusNav.position} / {focusNav.total}
+            </span>
+            <button
+              type="button"
+              onClick={focusNav.onNext}
+              disabled={focusNav.position >= focusNav.total}
+              className="p-1 rounded text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Next file"
+              aria-label="Next file"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        )}
         {isChangedSinceViewed && !isReviewed && (
           <span
             className="inline-flex h-6 items-center rounded-full border border-github-warning px-2.5 text-xs font-medium text-github-warning"

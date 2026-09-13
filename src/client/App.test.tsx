@@ -1,4 +1,5 @@
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { HotkeysProvider } from 'react-hotkeys-hook';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import '@testing-library/jest-dom';
@@ -1163,6 +1164,192 @@ describe('App Component - Active file scrollspy', () => {
     });
     expect(getTreeFileRow('file1.ts')).not.toHaveAttribute('data-active');
     expect(getTreeFileRow('file2.ts')).not.toHaveAttribute('data-active');
+  });
+});
+
+describe('App Component - Focus mode', () => {
+  const focusFileChunk = (start: number) => ({
+    oldStart: start,
+    oldLines: 2,
+    newStart: start,
+    newLines: 2,
+    header: `@@ -${start},2 +${start},2 @@`,
+    lines: [
+      {
+        type: 'normal' as const,
+        oldLineNumber: start,
+        newLineNumber: start,
+        content: '  unchanged',
+      },
+      { type: 'add' as const, newLineNumber: start + 1, content: '+ added line' },
+    ],
+  });
+
+  const threeFileDiffResponse: DiffResponse = {
+    ...mockDiffResponse,
+    files: [
+      {
+        path: 'file1.ts',
+        status: 'modified',
+        additions: 1,
+        deletions: 0,
+        chunks: [focusFileChunk(1)],
+      },
+      {
+        path: 'file2.ts',
+        status: 'modified',
+        additions: 1,
+        deletions: 0,
+        chunks: [focusFileChunk(1)],
+      },
+      {
+        path: 'file3.ts',
+        status: 'modified',
+        additions: 1,
+        deletions: 0,
+        chunks: [focusFileChunk(1)],
+      },
+    ],
+  };
+
+  const getDiffFileWrappers = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('main [data-file-path]'));
+
+  const getFocusModeToggle = (): HTMLElement =>
+    screen.getByTitle('Focus mode — show only the active file (Esc to exit)');
+
+  const enableFocusMode = async () => {
+    const toggle = await screen.findByTitle('Focus mode — show only the active file (Esc to exit)');
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(getDiffFileWrappers()).toHaveLength(1);
+    });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockComments = [];
+    mockConfirm.mockReturnValue(false);
+    mockFetch(threeFileDiffResponse);
+  });
+
+  it('renders exactly one file wrapper in focus mode versus all files in list mode', async () => {
+    renderApp();
+
+    await waitFor(() => {
+      expect(getDiffFileWrappers()).toHaveLength(3);
+    });
+
+    await enableFocusMode();
+
+    const wrappers = getDiffFileWrappers();
+    expect(wrappers).toHaveLength(1);
+    expect(wrappers[0]).toHaveAttribute('data-file-path', 'file1.ts');
+  });
+
+  it('reflects the enabled state on the toggle and restores all wrappers when toggled off', async () => {
+    renderApp();
+
+    const toggle = await screen.findByTitle('Focus mode — show only the active file (Esc to exit)');
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    await enableFocusMode();
+    expect(getFocusModeToggle()).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(getFocusModeToggle());
+
+    await waitFor(() => {
+      expect(getDiffFileWrappers()).toHaveLength(3);
+    });
+    expect(getFocusModeToggle()).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('exits focus mode on Escape when no modal is open', async () => {
+    renderApp();
+
+    await enableFocusMode();
+
+    fireEvent.keyDown(document, { key: 'Escape', code: 'Escape' });
+
+    await waitFor(() => {
+      expect(getDiffFileWrappers()).toHaveLength(3);
+    });
+    expect(getFocusModeToggle()).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('keeps focus mode when Escape fires while focus is inside an input', async () => {
+    renderApp();
+
+    await enableFocusMode();
+
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+    expect(document.activeElement).toBe(input);
+
+    fireEvent.keyDown(document, { key: 'Escape', code: 'Escape' });
+
+    await act(async () => {});
+    expect(getDiffFileWrappers()).toHaveLength(1);
+    expect(getFocusModeToggle()).toHaveAttribute('aria-pressed', 'true');
+
+    input.remove();
+  });
+
+  it('moves focus to the next unviewed file when the focused file is marked viewed', async () => {
+    renderApp();
+
+    await enableFocusMode();
+    expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file1.ts');
+
+    fireEvent.click(screen.getByRole('button', { name: /Viewed/ }));
+
+    await waitFor(() => {
+      const wrappers = getDiffFileWrappers();
+      expect(wrappers).toHaveLength(1);
+      expect(wrappers[0]).toHaveAttribute('data-file-path', 'file2.ts');
+    });
+  });
+
+  it('switches the focused file with the ] and [ keys', async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await enableFocusMode();
+
+    // From a null cursor the first ] lands on file 1 (the focused file);
+    // the next one moves to file 2.
+    await user.keyboard('{\\]}');
+    await user.keyboard('{\\]}');
+    await waitFor(() => {
+      expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file2.ts');
+    });
+
+    await user.keyboard('{\\[}');
+    await waitFor(() => {
+      expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file1.ts');
+    });
+  });
+
+  it('persists the focus mode toggle to localStorage', async () => {
+    renderApp();
+
+    await enableFocusMode();
+    expect(window.localStorage.getItem('difit.focusMode')).toBe('true');
+
+    fireEvent.click(getFocusModeToggle());
+    await waitFor(() => {
+      expect(window.localStorage.getItem('difit.focusMode')).toBe('false');
+    });
+  });
+
+  it('disables the focus toggle when the file list is empty', async () => {
+    mockFetch({ ...mockDiffResponse, files: [] });
+    renderApp();
+
+    const toggle = await screen.findByTitle('Focus mode — show only the active file (Esc to exit)');
+
+    expect(toggle).toBeDisabled();
   });
 });
 

@@ -82,13 +82,17 @@ export function HelpModal({ isOpen, onClose }: HelpModalProps) {
                 <kbd className="px-2 py-1 bg-github-bg-tertiary border border-github-border rounded text-github-text-primary font-mono">
                   ]
                 </kbd>
-                <span className="text-github-text-secondary">Next file</span>
+                <span className="text-github-text-secondary">
+                  Next file (focus mode: switch focused file)
+                </span>
               </div>
               <div className="flex justify-between text-sm">
                 <kbd className="px-2 py-1 bg-github-bg-tertiary border border-github-border rounded text-github-text-primary font-mono">
                   [
                 </kbd>
-                <span className="text-github-text-secondary">Previous file</span>
+                <span className="text-github-text-secondary">
+                  Previous file (focus mode: switch focused file)
+                </span>
               </div>
               <div className="flex justify-between text-sm">
                 <div className="flex items-center gap-1">
@@ -293,6 +297,15 @@ export function HelpModal({ isOpen, onClose }: HelpModalProps) {
                   ?
                 </kbd>
                 <span className="text-github-text-secondary">Show/hide this help</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <kbd className="px-2 py-1 bg-github-bg-tertiary border border-github-border rounded text-github-text-primary font-mono">
+                  Esc
+                </kbd>
+                <span className="text-github-text-secondary">
+                  Exit focus mode (also closes open forms and modals; focus mode exits only when
+                  none are open)
+                </span>
               </div>
             </div>
           </section>

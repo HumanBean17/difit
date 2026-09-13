@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom';
 
@@ -116,5 +116,55 @@ describe('DiffViewerHeader path display', () => {
     expect(
       screen.getByText(/renamed from src\/main\/java\/com\/acme\/BaseUserService\.java/),
     ).toBeInTheDocument();
+  });
+});
+
+describe('DiffViewerHeader focus navigation', () => {
+  it('renders the position label and chevron buttons that invoke the callbacks', () => {
+    const onPrev = vi.fn();
+    const onNext = vi.fn();
+    render(
+      <DiffViewerHeader {...baseProps} focusNav={{ position: 3, total: 27, onPrev, onNext }} />,
+    );
+
+    expect(screen.getByText('3 / 27')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Previous file'));
+    expect(onPrev).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTitle('Next file'));
+    expect(onNext).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables the previous button at the first file', () => {
+    render(
+      <DiffViewerHeader
+        {...baseProps}
+        focusNav={{ position: 1, total: 27, onPrev: vi.fn(), onNext: vi.fn() }}
+      />,
+    );
+
+    expect(screen.getByTitle('Previous file')).toBeDisabled();
+    expect(screen.getByTitle('Next file')).toBeEnabled();
+  });
+
+  it('disables the next button at the last file', () => {
+    render(
+      <DiffViewerHeader
+        {...baseProps}
+        focusNav={{ position: 27, total: 27, onPrev: vi.fn(), onNext: vi.fn() }}
+      />,
+    );
+
+    expect(screen.getByTitle('Previous file')).toBeEnabled();
+    expect(screen.getByTitle('Next file')).toBeDisabled();
+  });
+
+  it('renders nothing extra without focusNav', () => {
+    render(<DiffViewerHeader {...baseProps} />);
+
+    expect(screen.queryByTitle('Previous file')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Next file')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Focused file position')).not.toBeInTheDocument();
   });
 });

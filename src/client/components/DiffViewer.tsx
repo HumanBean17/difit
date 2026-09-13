@@ -15,7 +15,7 @@ import { isWholeFileHighlightExtension } from '../utils/languageDetection';
 import { getViewerForFile } from '../viewers/registry';
 import type { DiffViewerBodyProps } from '../viewers/types';
 
-import { DiffViewerHeader } from './DiffViewerHeader';
+import { DiffViewerHeader, type FocusNav } from './DiffViewerHeader';
 import type { AppearanceSettings } from './SettingsModal';
 
 interface DiffViewerProps {
@@ -48,6 +48,7 @@ interface DiffViewerProps {
   cursor?: CursorPosition | null;
   isFocused?: boolean;
   fileIndex?: number;
+  focusNav?: FocusNav;
   mergedChunks: MergedChunk[];
   expandLines: (
     file: DiffFile,
@@ -199,6 +200,7 @@ export const DiffViewer = memo(function DiffViewer({
   cursor = null,
   isFocused = false,
   fileIndex = 0,
+  focusNav,
   onLineClick,
   commentTrigger,
   onCommentTriggerHandled,
@@ -372,6 +374,7 @@ export const DiffViewer = memo(function DiffViewer({
         isFocused={isFocused}
         isReviewed={reviewedFiles.has(file.path)}
         isChangedSinceViewed={isChangedSinceViewed}
+        focusNav={focusNav}
         onToggleCollapsed={onToggleCollapsed}
         onToggleAllCollapsed={onToggleAllCollapsed}
         onToggleReviewed={onToggleReviewed}
