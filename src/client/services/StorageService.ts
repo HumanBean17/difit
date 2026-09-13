@@ -43,6 +43,8 @@ function migrateLegacyComment(comment: LegacyDiffComment): DiffCommentThread {
 function normalizeRootComment(thread: DiffCommentThread): LegacyDiffComment | null {
   const rootMessage = thread.messages[0];
   if (!rootMessage) return null;
+  // General (file-independent) threads have no legacy flat-comment shape.
+  if (thread.filePath === null || thread.position === undefined) return null;
 
   return {
     id: thread.id,

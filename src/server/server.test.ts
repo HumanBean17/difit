@@ -220,7 +220,7 @@ describe('Server Integration Tests', () => {
       const res = await fetch(`http://localhost:${port}/api/comments-json`);
       return (await res.json()) as {
         version: number;
-        threads: Array<{ id: string; filePath: string }>;
+        threads: Array<{ id: string; filePath: string | null; position?: unknown }>;
       };
     };
 
@@ -344,6 +344,144 @@ describe('Server Integration Tests', () => {
           });
         }
       }
+    });
+
+    describe('general threads', () => {
+      it('stores and returns general threads with filePath null and no position', async () => {
+        const port = await getAvailablePort(4966);
+        const result = await startServer({
+          preferredPort: port,
+          openBrowser: false,
+        });
+
+        try {
+          const generalThread = {
+            id: 'general-1',
+            filePath: null,
+            createdAt: isoNow,
+            updatedAt: isoNow,
+            messages: [{ id: 'general-1', body: 'ship it', createdAt: isoNow, updatedAt: isoNow }],
+          };
+
+          await postThreads(result.port, [
+            generalThread,
+            makeThread('t1', 'src/a.ts', 10, 'file thread'),
+          ]);
+
+          const session = await getSession(result.port);
+          expect(session.threads).toHaveLength(2);
+
+          const general = session.threads.find((thread) => thread.id === 'general-1');
+          expect(general).toBeDefined();
+          expect(general?.filePath).toBeNull();
+          expect(general && 'position' in general).toBe(false);
+
+          // File-based threads round-trip unchanged.
+          const fileThread = session.threads.find((thread) => thread.id === 't1');
+          expect(fileThread?.filePath).toBe('src/a.ts');
+          expect(fileThread?.position).toEqual({ side: 'new', line: 10 });
+
+          // CLI output renders the general location line.
+          const outputResponse = await fetch(`http://localhost:${result.port}/api/comments-output`);
+          const output = await outputResponse.text();
+          expect(output).toContain('General comment');
+          expect(output).toContain('ship it');
+          expect(output).toContain('src/a.ts:L10');
+        } finally {
+          if (result.server) {
+            await new Promise<void>((resolve) => {
+              result.server!.close(() => resolve());
+            });
+          }
+        }
+      });
+
+      it('normalizes a legacy CommentThread payload with file null to a general thread', async () => {
+        const port = await getAvailablePort(4966);
+        const result = await startServer({
+          preferredPort: port,
+          openBrowser: false,
+        });
+
+        try {
+          await postThreads(result.port, [
+            {
+              id: 'legacy-general',
+              file: null,
+              line: null,
+              createdAt: isoNow,
+              updatedAt: isoNow,
+              messages: [
+                {
+                  id: 'legacy-general',
+                  body: 'general via legacy shape',
+                  createdAt: isoNow,
+                  updatedAt: isoNow,
+                },
+              ],
+            },
+          ]);
+
+          const session = await getSession(result.port);
+          expect(session.threads).toHaveLength(1);
+          const thread = session.threads[0];
+          expect(thread?.id).toBe('legacy-general');
+          expect(thread?.filePath).toBeNull();
+          expect(thread && 'position' in thread).toBe(false);
+
+          const outputResponse = await fetch(`http://localhost:${result.port}/api/comments-output`);
+          const output = await outputResponse.text();
+          expect(output).toContain('General comment');
+          expect(output).not.toContain('<unknown file>');
+        } finally {
+          if (result.server) {
+            await new Promise<void>((resolve) => {
+              result.server!.close(() => resolve());
+            });
+          }
+        }
+      });
+
+      it('keeps the unknown-file coercion for file threads that have a position but no file', async () => {
+        const port = await getAvailablePort(4966);
+        const result = await startServer({
+          preferredPort: port,
+          openBrowser: false,
+        });
+
+        try {
+          await postThreads(result.port, [
+            {
+              id: 'malformed-file-thread',
+              filePath: null,
+              createdAt: isoNow,
+              updatedAt: isoNow,
+              position: { side: 'new', line: 10 },
+              messages: [
+                {
+                  id: 'malformed-file-thread',
+                  body: 'position but no file',
+                  createdAt: isoNow,
+                  updatedAt: isoNow,
+                },
+              ],
+            },
+          ]);
+
+          const session = await getSession(result.port);
+          expect(session.threads).toHaveLength(1);
+          const thread = session.threads[0];
+          expect(thread?.id).toBe('malformed-file-thread');
+          expect(thread?.filePath).toBe('<unknown file>');
+          expect(thread?.position).toEqual({ side: 'new', line: 10 });
+        } finally {
+          if (result.server) {
+            await new Promise<void>((resolve) => {
+              result.server!.close(() => resolve());
+            });
+          }
+        }
+      });
     });
   });
 

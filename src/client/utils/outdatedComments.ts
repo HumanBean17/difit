@@ -38,6 +38,9 @@ export function isThreadOutdated(
   const snapshot = thread.codeSnapshot?.content;
   if (snapshot === undefined) return false;
 
+  // General (file-independent) threads are never outdated.
+  if (thread.position === undefined) return false;
+
   if (!index) return true;
 
   const sideIndex = thread.position.side === 'old' ? index.old : index.new;

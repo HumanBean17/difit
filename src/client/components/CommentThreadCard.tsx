@@ -326,7 +326,7 @@ export function CommentThreadCard({
             isRootMessage={true}
             showAuthorBadge={showAuthorBadges}
             syntaxTheme={syntaxTheme}
-            filename={thread.file}
+            filename={thread.file ?? undefined}
             originalCode={thread.codeContent}
             onUpdate={(newBody) => onUpdateMessage(thread.id, rootMessage.id, newBody)}
             onResolveOrDelete={() => onRemoveThread(thread.id)}
@@ -340,7 +340,7 @@ export function CommentThreadCard({
                 message={message}
                 showAuthorBadge={showAuthorBadges}
                 syntaxTheme={syntaxTheme}
-                filename={thread.file}
+                filename={thread.file ?? undefined}
                 originalCode={thread.codeContent}
                 onUpdate={(newBody) => onUpdateMessage(thread.id, message.id, newBody)}
                 onResolveOrDelete={() => onRemoveMessage(thread.id, message.id)}
@@ -363,7 +363,7 @@ export function CommentThreadCard({
                 onCancel={() => setIsReplying(false)}
                 selectedCode={thread.codeContent}
                 syntaxTheme={syntaxTheme}
-                filename={thread.file}
+                filename={thread.file ?? undefined}
                 embedded={true}
                 title="Reply to thread"
                 submitLabel="Reply"

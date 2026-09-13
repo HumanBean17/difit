@@ -219,6 +219,65 @@ const next = true;
     });
   });
 
+  describe('addGeneralThread', () => {
+    it('creates a general thread with null file, no position, and no code snapshot', () => {
+      const { result } = renderHook(() => useDiffComments('main', 'feature-branch', 'abc123'));
+
+      act(() => {
+        result.current.addGeneralThread('ship it');
+      });
+
+      expect(result.current.threads).toHaveLength(1);
+      const thread = result.current.threads[0];
+      expect(thread).toBeDefined();
+      expect(thread!.filePath).toBeNull();
+      expect(thread!.position).toBeUndefined();
+      expect(thread!.codeSnapshot).toBeUndefined();
+      expect(thread!.messages).toHaveLength(1);
+      expect(thread!.messages[0]?.body).toBe('ship it');
+      expect(thread!.messages[0]?.author).toBe('User');
+    });
+
+    it('persists the general thread through the storage service', () => {
+      const { result } = renderHook(() => useDiffComments('main', 'feature-branch', 'abc123'));
+
+      let threadId = '';
+      act(() => {
+        threadId = result.current.addGeneralThread('ship it').id;
+      });
+
+      expect(mockDiffContextData?.threads).toHaveLength(1);
+      expect(mockDiffContextData?.threads[0]?.id).toBe(threadId);
+      expect(mockDiffContextData?.threads[0]?.filePath).toBeNull();
+      expect(mockDiffContextData?.threads[0]?.position).toBeUndefined();
+    });
+
+    it('round-trips through storage on reload and renders the General comment prompt line', () => {
+      const { result } = renderHook(() => useDiffComments('main', 'feature-branch', 'abc123'));
+
+      let threadId = '';
+      act(() => {
+        threadId = result.current.addGeneralThread('ship it').id;
+      });
+
+      const { result: reloaded } = renderHook(() =>
+        useDiffComments('main', 'feature-branch', 'abc123'),
+      );
+
+      expect(reloaded.current.threads).toHaveLength(1);
+      expect(reloaded.current.threads[0]?.id).toBe(threadId);
+      expect(reloaded.current.threads[0]?.filePath).toBeNull();
+      expect(reloaded.current.threads[0]?.position).toBeUndefined();
+
+      const prompt = reloaded.current.generateThreadPrompt(threadId);
+      expect(prompt.split('\n')[0]).toBe('General comment');
+      expect(prompt).toBe('General comment\nship it');
+
+      const allPrompt = reloaded.current.generateAllCommentsPrompt();
+      expect(allPrompt.split('\n')[0]).toBe('General comment');
+    });
+  });
+
   describe('comment CRUD operations', () => {
     it('should add comment with code snapshot', () => {
       const { result } = renderHook(() => useDiffComments('main', 'feature-branch', 'abc123'));

@@ -212,6 +212,79 @@ Explain why this was removed.`);
     });
   });
 
+  describe('general (file-independent) threads', () => {
+    const timestamp = '2024-01-01T00:00:00Z';
+    const generalThread: CommentThread = {
+      id: 'general-thread',
+      file: null,
+      line: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      messages: [
+        {
+          id: 'general-message',
+          body: 'Overall this looks great.',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        },
+        {
+          id: 'general-reply',
+          body: 'Thanks!',
+          author: 'Author',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        },
+      ],
+    };
+    const fileThread: CommentThread = {
+      id: 'file-thread',
+      file: 'docs/SUMMARY.md',
+      line: 85,
+      side: 'old',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      messages: [
+        {
+          id: 'file-message',
+          body: 'Explain why this was removed.',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        },
+      ],
+    };
+
+    it('renders the location line as exactly "General comment" with replies intact', () => {
+      const result = formatCommentThreadPrompt(generalThread);
+
+      expect(result.split('\n')[0]).toBe('General comment');
+      expect(result).toBe('General comment\nOverall this looks great.\nReply 1 (Author)\nThanks!');
+    });
+
+    it('mixes general and file threads in order in the all-comments prompt', () => {
+      const result = formatAllCommentThreadsPrompt([fileThread, generalThread]);
+
+      expect(result).toBe(
+        [
+          'docs/SUMMARY.md:L85 (old)',
+          'Explain why this was removed.',
+          '=====',
+          'General comment',
+          'Overall this looks great.',
+          'Reply 1 (Author)',
+          'Thanks!',
+        ].join('\n'),
+      );
+    });
+
+    it('renders a lone general thread without any file:Lx segment', () => {
+      const result = formatAllCommentThreadsPrompt([generalThread]);
+
+      expect(result).toBe('General comment\nOverall this looks great.\nReply 1 (Author)\nThanks!');
+      expect(result).not.toContain('null');
+      expect(result).not.toContain('<unknown file>');
+    });
+  });
+
   describe('formatAllCommentsPrompt', () => {
     it('should return empty string for empty comments array', () => {
       const result = formatAllCommentsPrompt([]);

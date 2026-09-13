@@ -39,6 +39,7 @@ interface UseDiffCommentsReturn {
   replaceThreads: (threads: DiffCommentThread[]) => void;
   addComment: (params: AddThreadParams) => LegacyDiffComment;
   addThread: (params: AddThreadParams) => DiffCommentThread;
+  addGeneralThread: (body: string) => DiffCommentThread;
   removeComment: (commentId: string) => void;
   replyToThread: (params: ReplyToThreadParams) => void;
   removeThread: (threadId: string) => void;
@@ -57,10 +58,12 @@ function normalizeThread(thread: DiffCommentThread): CommentThread {
     id: thread.id,
     file: thread.filePath,
     line:
-      typeof thread.position.line === 'number'
-        ? thread.position.line
-        : ([thread.position.line.start, thread.position.line.end] as [number, number]),
-    side: thread.position.side,
+      thread.position === undefined
+        ? null
+        : typeof thread.position.line === 'number'
+          ? thread.position.line
+          : ([thread.position.line.start, thread.position.line.end] as [number, number]),
+    side: thread.position?.side,
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
     codeContent: thread.codeSnapshot?.content,
@@ -71,6 +74,9 @@ function normalizeThread(thread: DiffCommentThread): CommentThread {
 function normalizeRootComment(thread: DiffCommentThread): LegacyDiffComment | null {
   const rootMessage = thread.messages[0];
   if (!rootMessage) return null;
+  // General threads have no file/line position, so they have no legacy
+  // flat-comment representation.
+  if (thread.filePath === null || thread.position === undefined) return null;
 
   return {
     id: thread.id,
@@ -229,6 +235,33 @@ export function useDiffComments(
       return rootComment;
     },
     [addThread],
+  );
+
+  const addGeneralThread = useCallback(
+    (body: string): DiffCommentThread => {
+      const now = new Date().toISOString();
+      const threadId = createId();
+      const newThread: DiffCommentThread = {
+        id: threadId,
+        filePath: null,
+        createdAt: now,
+        updatedAt: now,
+        messages: [
+          {
+            id: threadId,
+            body,
+            author: 'User',
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+      };
+
+      const newThreads = [...threads, newThread];
+      saveThreads(newThreads);
+      return newThread;
+    },
+    [saveThreads, threads],
   );
 
   const replyToThread = useCallback(
@@ -456,6 +489,7 @@ export function useDiffComments(
     replaceThreads,
     addComment,
     addThread,
+    addGeneralThread,
     removeComment,
     replyToThread,
     removeThread,

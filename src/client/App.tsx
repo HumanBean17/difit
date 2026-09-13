@@ -599,14 +599,19 @@ function App() {
         id: thread.id,
         file: thread.filePath,
         line:
-          typeof thread.position.line === 'number'
-            ? thread.position.line
-            : ([thread.position.line.start, thread.position.line.end] as [number, number]),
-        side: thread.position.side,
+          thread.position === undefined
+            ? null
+            : typeof thread.position.line === 'number'
+              ? thread.position.line
+              : ([thread.position.line.start, thread.position.line.end] as [number, number]),
+        side: thread.position?.side,
         createdAt: thread.createdAt,
         updatedAt: thread.updatedAt,
         codeContent: thread.codeSnapshot?.content,
-        isOutdated: isThreadOutdated(thread, fileLineIndexByPath.get(thread.filePath)),
+        isOutdated:
+          thread.filePath === null
+            ? false
+            : isThreadOutdated(thread, fileLineIndexByPath.get(thread.filePath)),
         messages: thread.messages,
       })),
     [threads, fileLineIndexByPath],
@@ -618,6 +623,8 @@ function App() {
   const threadsByFile = useMemo(() => {
     const map = new Map<string, CommentThread[]>();
     normalizedThreads.forEach((thread) => {
+      // General (file-independent) threads are not anchored to any file.
+      if (thread.file === null) return;
       const entry = map.get(thread.file);
       if (entry) {
         entry.push(thread);
@@ -1397,6 +1404,10 @@ function App() {
 
   const handleNavigateToComment = (thread: CommentThread) => {
     if (!diffData) return;
+
+    // General (file-independent) threads have no diff position to scroll to.
+    // TODO(Task 5): scroll to the general comment card instead.
+    if (thread.file === null) return;
 
     const position = findCommentPosition(thread, diffData.files);
     if (position) {

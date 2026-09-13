@@ -19,6 +19,15 @@ function formatCommentLocation(file: string, line: number | number[], side?: Dif
   return `${filePath}:${getLineInfo(line)}${side === 'old' ? ' (old)' : ''}`;
 }
 
+function formatThreadLocation(thread: CommentThread): string {
+  // General (file-independent) threads have no file:Lx segment at all.
+  if (thread.file === null || thread.line === null) {
+    return 'General comment';
+  }
+
+  return formatCommentLocation(thread.file, thread.line, thread.side);
+}
+
 function isNonRangeCommitish(commitish: string): boolean {
   return (
     commitish === 'working' || commitish === 'staged' || commitish === '.' || commitish === 'stdin'
@@ -130,7 +139,7 @@ export function formatAllCommentsPrompt(comments: Comment[]): string {
 }
 
 export function formatCommentThreadPrompt(thread: CommentThread): string {
-  const sections: string[] = [formatCommentLocation(thread.file, thread.line, thread.side)];
+  const sections: string[] = [formatThreadLocation(thread)];
 
   thread.messages.forEach((message, index) => {
     if (index === 0) {

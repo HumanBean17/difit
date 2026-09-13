@@ -58,6 +58,9 @@ export function findCommentPosition(
   commentThread: CommentThread,
   files: DiffFile[],
 ): CursorPosition | null {
+  // General (file-independent) threads have no diff position.
+  if (commentThread.file === null || commentThread.line === null) return null;
+
   const fileIndex = files.findIndex((f) => f.path === commentThread.file);
   if (fileIndex === -1) return null;
 

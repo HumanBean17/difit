@@ -55,6 +55,8 @@ export function useKeyboardNavigation({
   const commentIndex = useMemo(() => {
     const index = new Map<string, CommentNavigationItem[]>();
     comments.forEach((thread) => {
+      // General (file-independent) threads have no line to navigate to.
+      if (thread.file === null || thread.line === null) return;
       const lineNum = Array.isArray(thread.line) ? thread.line[0] : thread.line;
       const key = getCommentKey(thread.file, lineNum, thread.side);
       if (!index.has(key)) {

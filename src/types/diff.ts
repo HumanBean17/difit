@@ -112,11 +112,13 @@ export interface DiffCommentMessage {
 // New data structures for enhanced comment and viewed state management
 export interface DiffCommentThread {
   id: string;
-  filePath: string;
+  // null identifies a general (file-independent) thread; such threads have no
+  // position and no codeSnapshot.
+  filePath: string | null;
   createdAt: string; // ISO 8601 format
   updatedAt: string; // ISO 8601 format
 
-  position: DiffCommentPosition;
+  position?: DiffCommentPosition;
 
   codeSnapshot?: DiffCommentCodeSnapshot;
 
@@ -189,8 +191,8 @@ export interface DiffContextStorage {
 
 export interface CommentThread {
   id: string;
-  file: string;
-  line: LineNumber;
+  file: string | null; // null for general (file-independent) threads
+  line: LineNumber | null; // null for general (file-independent) threads
   side?: DiffSide;
   createdAt: string;
   updatedAt: string;

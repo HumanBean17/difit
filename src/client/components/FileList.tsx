@@ -208,6 +208,8 @@ export const FileList = memo(function FileList({
   const commentCountMap = useMemo(() => {
     const counts = new Map<string, number>();
     comments.forEach((comment) => {
+      // General (file-independent) threads are not attached to any tree node.
+      if (comment.file === null) return;
       counts.set(comment.file, (counts.get(comment.file) ?? 0) + 1);
     });
     return counts;

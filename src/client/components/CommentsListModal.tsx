@@ -39,12 +39,12 @@ export function CommentsListModal({
   const { enableScope, disableScope } = useHotkeysContext();
 
   const sortedThreads = [...comments].sort((a, b) => {
-    const fileCompare = a.file.localeCompare(b.file);
+    const fileCompare = (a.file ?? '').localeCompare(b.file ?? '');
     if (fileCompare !== 0) return fileCompare;
 
     const aLine = Array.isArray(a.line) ? a.line[0] : a.line;
     const bLine = Array.isArray(b.line) ? b.line[0] : b.line;
-    if (aLine !== bLine) return aLine - bLine;
+    if (aLine !== bLine) return (aLine ?? 0) - (bLine ?? 0);
 
     return a.createdAt.localeCompare(b.createdAt);
   });

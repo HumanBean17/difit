@@ -24,8 +24,8 @@ export interface NavigationResult {
 }
 
 export interface CommentNavigationItem {
-  file: string;
-  line: LineNumber;
+  file: string | null; // null for general (file-independent) threads
+  line: LineNumber | null; // null for general (file-independent) threads
   side?: DiffSide;
 }
 
