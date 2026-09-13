@@ -48,6 +48,7 @@ import { copyTextToClipboard } from './utils/clipboard';
 import { getFileElementId } from './utils/domUtils';
 import { findCommentPosition } from './utils/navigation/positionHelpers';
 import { resolveEventSourceUrl } from './utils/eventSourceUrl';
+import { splitFilePath } from './utils/filePath';
 import {
   EMPTY_MERGED_CHUNKS_STATE,
   buildMergedChunksState,
@@ -1481,6 +1482,7 @@ function App() {
                 getMergedChunksForVersion(mergedChunksState, diffDataVersion, file.path) ??
                 EMPTY_MERGED_CHUNKS;
               const isRendered = renderedFilePaths.has(file.path);
+              const { directory: fileDirectory, basename: fileBasename } = splitFilePath(file.path);
               return (
                 <div
                   key={file.path}
@@ -1542,8 +1544,21 @@ function App() {
                           <div className="text-xs uppercase tracking-wide text-github-text-muted">
                             Deferred Rendering
                           </div>
-                          <div className="text-sm font-mono text-github-text-primary truncate">
-                            {file.path}
+                          <div className="text-sm font-mono text-github-text-primary min-w-0 flex overflow-hidden">
+                            {fileDirectory !== '' && (
+                              <>
+                                <span
+                                  className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+                                  style={{ direction: 'rtl', unicodeBidi: 'plaintext' }}
+                                >
+                                  {fileDirectory}
+                                </span>
+                                <span className="text-github-text-muted shrink-0">/</span>
+                              </>
+                            )}
+                            <span className="text-github-text-primary font-medium shrink-0 whitespace-nowrap">
+                              {fileBasename}
+                            </span>
                           </div>
                         </div>
                         <button

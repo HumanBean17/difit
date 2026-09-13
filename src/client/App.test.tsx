@@ -1068,9 +1068,12 @@ describe('App Component - Mobile sidebar auto-close', () => {
     const toggleButton = await screen.findByRole('button', { name: /toggle file tree panel/i });
     expect(toggleButton).toHaveAttribute('aria-expanded', 'true');
 
-    // Wait for file list to render, then click the file row
-    const fileRow = await screen.findByTitle('test.ts');
-    fireEvent.click(fileRow.closest('[data-file-row]')!);
+    // Wait for file list to render, then click the file row.
+    // The diff header also exposes the path via its title attribute, so pick
+    // the titled element that belongs to a sidebar file row.
+    const titledElements = await screen.findAllByTitle('test.ts');
+    const fileRow = titledElements.find((el) => el.closest('[data-file-row]'));
+    fireEvent.click(fileRow!.closest('[data-file-row]')!);
 
     // Sidebar should now be closed on mobile
     await waitFor(() => {

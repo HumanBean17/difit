@@ -13,6 +13,7 @@ import { useState } from 'react';
 
 import type { DiffFile } from '../../types/diff';
 import { copyTextToClipboard } from '../utils/clipboard';
+import { splitFilePath } from '../utils/filePath';
 
 interface DiffViewerHeaderProps {
   file: DiffFile;
@@ -49,6 +50,7 @@ export const DiffViewerHeader = ({
   onToggleReviewed,
 }: DiffViewerHeaderProps) => {
   const [isCopied, setIsCopied] = useState(false);
+  const { directory, basename } = splitFilePath(file.path);
 
   return (
     <div
@@ -76,8 +78,24 @@ export const DiffViewerHeader = ({
           {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
         </button>
         {getFileIcon(file.status)}
-        <h2 className="text-sm font-mono text-github-text-primary m-0 overflow-hidden text-ellipsis whitespace-nowrap">
-          {file.path}
+        <h2
+          className="text-sm font-mono text-github-text-primary m-0 min-w-0 overflow-hidden flex items-baseline"
+          title={file.path}
+        >
+          {directory !== '' && (
+            <>
+              <span
+                className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+                style={{ direction: 'rtl', unicodeBidi: 'plaintext' }}
+              >
+                {directory}
+              </span>
+              <span className="text-github-text-muted shrink-0">/</span>
+            </>
+          )}
+          <span className="text-github-text-primary font-medium shrink-0 whitespace-nowrap">
+            {basename}
+          </span>
         </h2>
         <button
           className={`bg-transparent border-none cursor-pointer px-1.5 py-1 rounded text-sm transition-all hover:bg-github-bg-tertiary ${
