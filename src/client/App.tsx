@@ -2,6 +2,7 @@ import {
   Columns,
   AlignLeft,
   Focus,
+  MessageSquarePlus,
   Settings,
   PanelLeftClose,
   PanelLeft,
@@ -35,6 +36,7 @@ import { CommentsListModal } from './components/CommentsListModal';
 import { DiffQuickMenu } from './components/DiffQuickMenu';
 import { DiffViewer } from './components/DiffViewer';
 import { FileList } from './components/FileList';
+import { GeneralCommentsCard } from './components/GeneralCommentsCard';
 import { GitHubIcon } from './components/GitHubIcon';
 import { HelpModal } from './components/HelpModal';
 import { Logo } from './components/Logo';
@@ -172,6 +174,7 @@ function App() {
   const [showSparkles, setShowSparkles] = useState(false);
   const [hasTriggeredSparkles, setHasTriggeredSparkles] = useState(false);
   const [isCommentsListOpen, setIsCommentsListOpen] = useState(false);
+  const [isGeneralFormOpen, setIsGeneralFormOpen] = useState(false);
   const [isRevisionModalOpen, setIsRevisionModalOpen] = useState(false);
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const collapsedInitializedRef = useRef(false);
@@ -222,6 +225,7 @@ function App() {
     threads,
     replaceThreads,
     addThread,
+    addGeneralThread,
     replyToThread,
     removeThread,
     removeMessage,
@@ -634,6 +638,11 @@ function App() {
     });
     return map;
   }, [normalizedThreads]);
+  // General (file-independent) threads render in the pinned card above the files.
+  const generalThreads = useMemo(
+    () => normalizedThreads.filter((thread) => thread.file === null),
+    [normalizedThreads],
+  );
 
   // State to trigger comment creation from keyboard
   const [commentTrigger, setCommentTrigger] = useState<{
@@ -1377,6 +1386,24 @@ function App() {
     [addThread],
   );
 
+  const handleOpenGeneralCommentForm = useCallback(() => {
+    setIsGeneralFormOpen(true);
+    // The general card is pinned to the top of the diff area, so reveal it.
+    const scrollContainer = diffScrollContainerRef.current;
+    if (scrollContainer) {
+      scrollContainer.scrollTop = 0;
+    }
+  }, []);
+
+  const handleAddGeneralComment = useCallback(
+    (body: string): Promise<void> => {
+      addGeneralThread(body);
+      setIsGeneralFormOpen(false);
+      return Promise.resolve();
+    },
+    [addGeneralThread],
+  );
+
   const handleCopyAllComments = async () => {
     try {
       const prompt = generateAllCommentsPrompt({
@@ -1405,9 +1432,12 @@ function App() {
   const handleNavigateToComment = (thread: CommentThread) => {
     if (!diffData) return;
 
-    // General (file-independent) threads have no diff position to scroll to.
-    // TODO(Task 5): scroll to the general comment card instead.
-    if (thread.file === null) return;
+    // General (file-independent) threads have no diff position to scroll to;
+    // scroll the pinned general comments card into view instead.
+    if (thread.file === null) {
+      document.getElementById('general-comments')?.scrollIntoView({ block: 'start' });
+      return;
+    }
 
     const position = findCommentPosition(thread, diffData.files);
     if (position) {
@@ -1543,6 +1573,14 @@ function App() {
                 aria-label="Toggle file tree panel"
               >
                 {isFileTreeOpen ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenGeneralCommentForm}
+                className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
+                title="Add general comment"
+              >
+                <MessageSquarePlus size={18} />
               </button>
               <button
                 onClick={() => setIsSettingsOpen(true)}
@@ -1800,6 +1838,21 @@ function App() {
             ref={diffScrollContainerRef}
             className={`flex-1 overflow-y-auto ${showMobileCommentsBar ? 'pb-16' : ''}`}
           >
+            {/* General (file-independent) threads stay pinned above the files
+                in both list and focus mode. */}
+            <GeneralCommentsCard
+              threads={generalThreads}
+              isFormOpen={isGeneralFormOpen}
+              onFormOpenChange={setIsGeneralFormOpen}
+              onAddComment={handleAddGeneralComment}
+              showAuthorBadges={showAuthorBadges}
+              onGenerateThreadPrompt={handleGenerateThreadPrompt}
+              onRemoveThread={removeThread}
+              onReplyToThread={handleReplyToThread}
+              onRemoveMessage={removeMessage}
+              onUpdateMessage={updateMessage}
+              syntaxTheme={settings.syntaxTheme}
+            />
             {visibleFileEntries.map(({ file, fileIndex }) => {
               const fileThreads = threadsByFile.get(file.path) ?? EMPTY_COMMENT_THREADS;
               const mergedChunks =

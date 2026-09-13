@@ -62,6 +62,23 @@ const mockThreads: CommentThread[] = [
   },
 ];
 
+const mockGeneralThread: CommentThread = {
+  id: 'general-thread',
+  file: null,
+  line: null,
+  createdAt: '2024-01-01T00:03:00Z',
+  updatedAt: '2024-01-01T00:03:00Z',
+  messages: [
+    {
+      id: 'general-thread',
+      body: 'General root comment',
+      author: 'User',
+      createdAt: '2024-01-01T00:03:00Z',
+      updatedAt: '2024-01-01T00:03:00Z',
+    },
+  ],
+};
+
 const mockRemoveThread = vi.fn();
 const mockGenerateThreadPrompt = vi.fn().mockReturnValue('thread prompt');
 const mockReplyToThread = vi.fn().mockResolvedValue(undefined);
@@ -269,5 +286,73 @@ describe('CommentsListModal', () => {
     );
 
     expect(screen.getByText('No comments yet')).toBeInTheDocument();
+  });
+
+  it('sorts general threads first under a General label while keeping file order unchanged', () => {
+    render(
+      <CommentsListModal
+        isOpen={true}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        // Deliberately unsorted input: the general thread must float to the top.
+        comments={[mockThreads[0]!, mockGeneralThread, mockThreads[1]!]}
+        onRemoveThread={mockRemoveThread}
+        onGenerateThreadPrompt={mockGenerateThreadPrompt}
+        onReplyToThread={mockReplyToThread}
+        onRemoveMessage={mockRemoveMessage}
+        onUpdateMessage={mockUpdateMessage}
+      />,
+      { wrapper },
+    );
+
+    expect(screen.getByText('General root comment')).toBeInTheDocument();
+
+    const generalCard = document.getElementById('comment-thread-general-thread');
+    const firstFileCard = document.getElementById('comment-thread-thread-1');
+    const secondFileCard = document.getElementById('comment-thread-thread-2');
+    expect(generalCard).not.toBeNull();
+    expect(firstFileCard).not.toBeNull();
+    expect(secondFileCard).not.toBeNull();
+
+    // General threads render before file threads; file order is untouched.
+    expect(
+      generalCard!.compareDocumentPosition(firstFileCard!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      firstFileCard!.compareDocumentPosition(secondFileCard!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // The General section label renders above the general thread card, and the
+    // general card's own location label also reads General.
+    const generalLabels = screen.getAllByText('General');
+    expect(generalLabels.length).toBe(2);
+    expect(
+      generalLabels[0]!.compareDocumentPosition(generalCard!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('navigates when clicking a general thread', () => {
+    const onClose = vi.fn();
+    const onNavigate = vi.fn();
+
+    render(
+      <CommentsListModal
+        isOpen={true}
+        onClose={onClose}
+        onNavigate={onNavigate}
+        comments={[mockGeneralThread, mockThreads[0]!]}
+        onRemoveThread={mockRemoveThread}
+        onGenerateThreadPrompt={mockGenerateThreadPrompt}
+        onReplyToThread={mockReplyToThread}
+        onRemoveMessage={mockRemoveMessage}
+        onUpdateMessage={mockUpdateMessage}
+      />,
+      { wrapper },
+    );
+
+    fireEvent.click(screen.getByText('General root comment'));
+
+    expect(onNavigate).toHaveBeenCalledWith(mockGeneralThread);
+    expect(onClose).toHaveBeenCalled();
   });
 });

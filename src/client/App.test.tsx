@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HotkeysProvider } from 'react-hotkeys-hook';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -28,6 +28,7 @@ vi.mock('./hooks/useDiffComments', () => ({
     replaceThreads: mockReplaceThreads,
     addComment: vi.fn(),
     addThread: vi.fn(),
+    addGeneralThread: mockAddGeneralThread,
     removeComment: vi.fn(),
     removeThread: vi.fn(),
     removeMessage: vi.fn(),
@@ -123,6 +124,7 @@ Object.defineProperty(window, 'EventSource', {
 
 let mockComments: DiffCommentThread[] = [];
 const mockReplaceThreads = vi.fn();
+const mockAddGeneralThread = vi.fn();
 const mockClearAllComments = vi.fn();
 const mockApplyCommentImports = vi.fn(() => []);
 const mockGenerateAllCommentsPrompt = vi.fn(() => 'formatted prompt');
@@ -175,6 +177,7 @@ beforeEach(() => {
   mockViewedFiles = new Set<string>();
   mockHasLoadedInitialViewedFiles = true;
   mockReplaceThreads.mockReset();
+  mockAddGeneralThread.mockReset();
   mockGenerateAllCommentsPrompt.mockClear();
 });
 
@@ -1384,5 +1387,114 @@ describe('App Component - Mobile sidebar auto-close', () => {
     await waitFor(() => {
       expect(toggleButton).toHaveAttribute('aria-expanded', 'false');
     });
+  });
+});
+
+describe('App Component - General comments', () => {
+  const createGeneralMockThread = (id: string, body: string): DiffCommentThread => {
+    const timestamp = '2024-01-01T00:00:00.000Z';
+    return {
+      id,
+      filePath: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      messages: [
+        {
+          id,
+          body,
+          author: 'User',
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        },
+      ],
+    };
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockComments = [];
+    mockConfirm.mockReturnValue(false);
+    mockFetch(mockDiffResponse);
+  });
+
+  it('renders the top-bar button but no general comments card before any general comment exists', async () => {
+    renderApp();
+
+    expect(await screen.findByTitle('Add general comment')).toBeInTheDocument();
+    expect(document.getElementById('general-comments')).toBeNull();
+    expect(screen.queryByRole('heading', { name: /General comments/ })).not.toBeInTheDocument();
+  });
+
+  it('opens the general comment form and scrolls the diff container to top', async () => {
+    const { container } = renderApp();
+
+    const addButton = await screen.findByTitle('Add general comment');
+    const scrollContainer = container.querySelector('main');
+    expect(scrollContainer).not.toBeNull();
+    scrollContainer!.scrollTop = 400;
+
+    fireEvent.click(addButton);
+
+    expect(await screen.findByText('General comment')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Leave a general comment...')).toBeInTheDocument();
+    expect(scrollContainer!.scrollTop).toBe(0);
+  });
+
+  it('submits a general comment from the top-bar form and shows it in the card', async () => {
+    const generalThread = createGeneralMockThread('general-1', 'Overall this looks great');
+    mockAddGeneralThread.mockImplementation(() => {
+      mockComments = [generalThread];
+      return generalThread;
+    });
+
+    const { rerender } = renderApp();
+
+    fireEvent.click(await screen.findByTitle('Add general comment'));
+
+    const textarea = await screen.findByPlaceholderText('Leave a general comment...');
+    fireEvent.change(textarea, { target: { value: 'Overall this looks great' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+
+    await waitFor(() => {
+      expect(mockAddGeneralThread).toHaveBeenCalledWith('Overall this looks great');
+    });
+    // The form closes after a successful submit.
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText('Leave a general comment...')).not.toBeInTheDocument();
+    });
+
+    // Reflect the hook state update, as the real useDiffComments would.
+    rerender(
+      <HotkeysProvider initiallyActiveScopes={['navigation']}>
+        <App />
+      </HotkeysProvider>,
+    );
+
+    expect(await screen.findByText('Overall this looks great')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'General comments (1)' })).toBeInTheDocument();
+  });
+
+  it('scrolls the general comments card into view when navigating to a general thread', async () => {
+    mockComments = [createGeneralMockThread('general-1', 'General remark')];
+
+    renderApp();
+
+    fireEvent.click(await screen.findByTitle('More options'));
+    fireEvent.click(await screen.findByText('View All Comments'));
+
+    const generalCard = await waitFor(() => {
+      const element = document.getElementById('general-comments');
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    const scrollIntoViewSpy = vi.spyOn(generalCard, 'scrollIntoView');
+
+    // The body text also exists in the pinned card behind the modal, so scope
+    // the click to the modal's own copy of the thread.
+    const modal = screen.getByText('All Comments').closest('div.fixed');
+    expect(modal).not.toBeNull();
+    fireEvent.click(within(modal as HTMLElement).getByText('General remark'));
+
+    expect(scrollIntoViewSpy).toHaveBeenCalled();
   });
 });

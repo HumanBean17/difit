@@ -218,6 +218,8 @@ export function CommentThreadCard({
   const lineLabel = Array.isArray(thread.line)
     ? `${thread.line[0]}-${thread.line[1]}`
     : thread.line;
+  // General (file-independent) threads have no file/line location to show.
+  const locationLabel = thread.file === null ? 'General' : `${thread.file}:${lineLabel}`;
 
   const toggleCollapsed = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -266,7 +268,7 @@ export function CommentThreadCard({
               color: 'var(--color-yellow-path-text)',
             }}
           >
-            {thread.file}:{lineLabel}
+            {locationLabel}
           </span>
           {thread.isOutdated && (
             <span
