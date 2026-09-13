@@ -45,6 +45,7 @@ import { RevisionDetailModal } from './components/RevisionDetailModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SparkleAnimation } from './components/SparkleAnimation';
 import { WordHighlightProvider } from './contexts/WordHighlightContext';
+import type { CursorPosition } from './hooks/keyboardNavigation';
 import { useAppearanceSettings } from './hooks/useAppearanceSettings';
 import { useDiffComments } from './hooks/useDiffComments';
 import { useExpandedLines, type MergedChunk } from './hooks/useExpandedLines';
@@ -380,6 +381,13 @@ function App() {
     setDiffData,
   });
 
+  // `toggleFileReviewed` needs to steer the keyboard cursor, but it is defined
+  // before `useKeyboardNavigation` returns those helpers — indirect through
+  // refs that are refreshed after each render.
+  const rememberFilePositionRef = useRef<(fileIndex: number) => void>(() => {});
+  const setCursorPositionRef = useRef<(position: CursorPosition | null) => void>(() => {});
+  const cursorRef = useRef<CursorPosition | null>(null);
+
   const toggleFileReviewed = useCallback(
     async (filePath: string) => {
       if (!diffData) return;
@@ -408,11 +416,13 @@ function App() {
         return newSet;
       });
 
-      // In focus mode, marking a file viewed advances focus to the next
-      // unviewed file strictly after the active one (no wrap; stays put if
-      // none remains). `viewedFiles` may be stale here, so the just-viewed
+      // In focus mode, marking the FOCUSED file viewed advances focus to the
+      // next unviewed file strictly after the active one (no wrap; stays put
+      // if none remains). Ticking an unrelated file's checkbox only updates
+      // its viewed state. `viewedFiles` may be stale here, so the just-viewed
       // file is skipped explicitly.
-      if (isFocusMode && !wasViewed) {
+      let advancedFileIndex: number | null = null;
+      if (isFocusMode && !wasViewed && diffData.files[activeFileIndex ?? -1]?.path === filePath) {
         for (
           let nextIndex = (activeFileIndex ?? 0) + 1;
           nextIndex < diffData.files.length;
@@ -421,12 +431,40 @@ function App() {
           const candidate = diffData.files[nextIndex];
           if (!candidate || candidate.path === filePath) continue;
           if (viewedFiles.has(candidate.path)) continue;
-          setActiveFileIndex(nextIndex);
+          advancedFileIndex = nextIndex;
           break;
         }
       }
 
-      if (shouldScrollToHeader) {
+      if (advancedFileIndex !== null) {
+        setActiveFileIndex(advancedFileIndex);
+        // Move the remembered navigation position — and, while keyboard
+        // navigation is active, the cursor itself — along with the focus so
+        // the cross-file cursor effect does not see a stale cursor and revert
+        // the advance.
+        rememberFilePositionRef.current(advancedFileIndex);
+        if (cursorRef.current !== null) {
+          setCursorPositionRef.current({
+            fileIndex: advancedFileIndex,
+            chunkIndex: 0,
+            lineIndex: 0,
+            side: diffMode === 'split' ? 'left' : 'right',
+          });
+        }
+        // Start the newly focused file from the top, like the other
+        // focus-switch paths.
+        requestAnimationFrame(() => {
+          const scrollContainer = diffScrollContainerRef.current;
+          if (scrollContainer) {
+            scrollContainer.scrollTop = 0;
+          }
+        });
+      }
+
+      // The header re-anchor only makes sense in list mode: in focus mode the
+      // advance above already reset the scroll, and the readiness loop behind
+      // this scroll can never pass once the old wrapper left the DOM.
+      if (shouldScrollToHeader && advancedFileIndex === null) {
         setTimeout(() => {
           scrollFileIntoDiffContainer(filePath);
         }, 100);
@@ -435,6 +473,7 @@ function App() {
     [
       activeFileIndex,
       diffData,
+      diffMode,
       isFileScrolledPastContainerTop,
       isFocusMode,
       scrollFileIntoDiffContainer,
@@ -712,6 +751,14 @@ function App() {
       },
     });
 
+  // Keep the indirect refs used by `toggleFileReviewed` (declared above the
+  // hook call) pointed at the latest helpers and cursor state.
+  useEffect(() => {
+    rememberFilePositionRef.current = rememberFilePosition;
+    setCursorPositionRef.current = setCursorPosition;
+    cursorRef.current = cursor;
+  }, [rememberFilePosition, setCursorPosition, cursor]);
+
   // Viewed button in the diff header: silently remember the toggled file as
   // the navigation position, so keyboard navigation resumes from it without
   // showing any keyboard UI for a mouse interaction
@@ -929,9 +976,12 @@ function App() {
         !isSettingsOpen &&
         !isCommentsListOpen &&
         !isRevisionModalOpen &&
-        !isHelpOpen,
+        !isHelpOpen &&
+        // The open general-comment form closes first via its own Escape
+        // handling; exiting focus mode at the same time would swallow it.
+        !isGeneralFormOpen,
     },
-    [activeFileIndex, diffData, scrollFileIntoDiffContainer],
+    [activeFileIndex, diffData, isGeneralFormOpen, scrollFileIntoDiffContainer],
   );
 
   const handleLineClick = useCallback(
@@ -1579,6 +1629,7 @@ function App() {
                 onClick={handleOpenGeneralCommentForm}
                 className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
                 title="Add general comment"
+                aria-label="Add general comment"
               >
                 <MessageSquarePlus size={18} />
               </button>
@@ -1636,7 +1687,26 @@ function App() {
               )}
               <button
                 type="button"
-                onClick={() => setIsFocusMode((prev) => !prev)}
+                onClick={() => {
+                  if (!isFocusMode) {
+                    // Entering: render the focused file synchronously so the
+                    // deferred-render placeholder never flashes for a frame
+                    // before the focus-mode entry effect runs.
+                    const pathToFocus = diffData.files[activeFileIndex ?? 0]?.path;
+                    if (pathToFocus) {
+                      ensureFileRendered(pathToFocus);
+                    }
+                    setIsFocusMode(true);
+                    return;
+                  }
+                  // Exiting via the button mirrors the Esc path: re-anchor the
+                  // list view on the file that was focused.
+                  const focusedPath = diffData.files[activeFileIndex ?? 0]?.path;
+                  setIsFocusMode(false);
+                  if (focusedPath) {
+                    scrollFileIntoDiffContainer(focusedPath);
+                  }
+                }}
                 disabled={diffData.files.length === 0}
                 className={`p-2 rounded transition-colors ${
                   isFocusMode
@@ -1922,12 +1992,12 @@ function App() {
                           <div className="text-xs uppercase tracking-wide text-github-text-muted">
                             Deferred Rendering
                           </div>
-                          <div className="text-sm font-mono text-github-text-primary min-w-0 flex overflow-hidden">
+                          <div className="text-sm font-mono text-github-text-primary min-w-0 flex items-baseline overflow-hidden">
                             {fileDirectory !== '' && (
                               <>
                                 <span
                                   className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-                                  style={{ direction: 'rtl', unicodeBidi: 'plaintext' }}
+                                  style={{ direction: 'rtl' }}
                                 >
                                   {fileDirectory}
                                 </span>

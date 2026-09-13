@@ -96,7 +96,7 @@ export const DiffViewerHeader = ({
             <>
               <span
                 className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-                style={{ direction: 'rtl', unicodeBidi: 'plaintext' }}
+                style={{ direction: 'rtl' }}
               >
                 {directory}
               </span>
@@ -148,10 +148,7 @@ export const DiffViewerHeader = ({
             >
               <ChevronLeft size={16} />
             </button>
-            <span
-              className="text-xs text-github-text-secondary tabular-nums whitespace-nowrap"
-              aria-label="Focused file position"
-            >
+            <span className="text-xs text-github-text-secondary tabular-nums whitespace-nowrap">
               {focusNav.position} / {focusNav.total}
             </span>
             <button

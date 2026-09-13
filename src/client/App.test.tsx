@@ -1314,6 +1314,79 @@ describe('App Component - Focus mode', () => {
     });
   });
 
+  it('keeps the advance when the v hotkey marks the focused file viewed with a live cursor', async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await enableFocusMode();
+    expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file1.ts');
+
+    // Establish a live keyboard cursor on file 1 (the first ] lands on file 1
+    // from a null cursor), then mark it viewed from the keyboard.
+    await user.keyboard('{\\]}');
+    await user.keyboard('v');
+
+    await waitFor(() => {
+      expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file2.ts');
+    });
+
+    // Without moving the cursor along with the focus, the cross-file cursor
+    // effect would revert the advance back to file 1.
+    await act(async () => {});
+    expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file2.ts');
+  });
+
+  it('does not change the focused file when a non-focused file is toggled viewed from the tree', async () => {
+    renderApp();
+
+    await enableFocusMode();
+    expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file1.ts');
+
+    // Tick the viewed checkbox of file 3 in the file tree; it is not the
+    // focused file, so focus must stay on file 1.
+    const file3Row = screen
+      .getAllByTitle('file3.ts')
+      .map((element) => element.closest<HTMLElement>('[data-file-row="true"]'))
+      .find((element) => element !== null);
+    expect(file3Row).toBeDefined();
+    fireEvent.click(within(file3Row as HTMLElement).getByRole('checkbox'));
+
+    await act(async () => {});
+    expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file1.ts');
+  });
+
+  it('resets the diff scroll container to the top when the viewed advance moves focus', async () => {
+    const { container } = renderApp();
+
+    await enableFocusMode();
+    const scrollContainer = container.querySelector('main');
+    expect(scrollContainer).not.toBeNull();
+    scrollContainer!.scrollTop = 250;
+
+    fireEvent.click(screen.getByRole('button', { name: /Viewed/ }));
+
+    await waitFor(() => {
+      expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file2.ts');
+    });
+    await waitFor(() => {
+      expect(scrollContainer!.scrollTop).toBe(0);
+    });
+  });
+
+  it('skips already-viewed files when advancing, landing on the next unviewed one', async () => {
+    mockViewedFiles = new Set(['file2.ts']);
+    renderApp();
+
+    await enableFocusMode();
+    expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file1.ts');
+
+    fireEvent.click(screen.getByRole('button', { name: /Viewed/ }));
+
+    await waitFor(() => {
+      expect(getDiffFileWrappers()[0]).toHaveAttribute('data-file-path', 'file3.ts');
+    });
+  });
+
   it('switches the focused file with the ] and [ keys', async () => {
     const user = userEvent.setup();
     renderApp();
@@ -1495,6 +1568,6 @@ describe('App Component - General comments', () => {
     expect(modal).not.toBeNull();
     fireEvent.click(within(modal as HTMLElement).getByText('General remark'));
 
-    expect(scrollIntoViewSpy).toHaveBeenCalled();
+    expect(scrollIntoViewSpy).toHaveBeenCalledWith({ block: 'start' });
   });
 });

@@ -86,8 +86,11 @@ describe('DiffViewerHeader path display', () => {
     render(<DiffViewerHeader {...baseProps} file={deepFile} />);
 
     const directory = screen.getByText('src/main/java/com/acme');
+    // `direction: rtl` alone drives the left-side truncation. Pairing it with
+    // `unicode-bidi: plaintext` defeats RTL truncation in real Chrome, so the
+    // span must NOT set unicode-bidi.
     expect(directory).toHaveAttribute('style', expect.stringContaining('direction: rtl'));
-    expect(directory).toHaveAttribute('style', expect.stringContaining('unicode-bidi: plaintext'));
+    expect(directory).toHaveAttribute('style', expect.not.stringContaining('unicode-bidi'));
   });
 
   it('exposes the full path via the title attribute for hover', () => {

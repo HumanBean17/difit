@@ -329,7 +329,11 @@ export const FileList = memo(function FileList({
   };
 
   const allPaths = useMemo(() => getAllDirectoryPaths(fileTree), [fileTree]);
-  const isAllExpanded = expandedDirs.size === allPaths.length && allPaths.length > 0;
+  // Compare against the real node paths only: selection-driven auto-expansion
+  // also unions synthetic prefixes (e.g. `src` when the tree merged it into
+  // `src/a`), which no node owns and which would make a size comparison
+  // permanently false — requiring two clicks to collapse everything.
+  const isAllExpanded = allPaths.length > 0 && allPaths.every((path) => expandedDirs.has(path));
 
   const toggleAllDirectories = () => {
     // If all directories are expanded, collapse all. Otherwise, expand all.

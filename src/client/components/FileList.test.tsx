@@ -240,5 +240,35 @@ describe('FileList', () => {
       expect(getTreeRow('src/b.ts')).toHaveAttribute('data-active', 'true');
       expect(getTreeRow('src/a.ts')).not.toHaveAttribute('data-active');
     });
+
+    it('collapses everything with a single click after selection-driven auto-expansion', () => {
+      // `src` and `src/a` collapse into one merged node keyed `src/a`, while
+      // auto-expansion unions the synthetic `src` prefix into expandedDirs.
+      const scrollIntoViewSpy = vi
+        .spyOn(Element.prototype, 'scrollIntoView')
+        .mockImplementation(() => {});
+      render(
+        <FileList
+          files={[createFile('src/a/one.ts'), createFile('src/a/two.ts')]}
+          onScrollToFile={vi.fn()}
+          comments={[]}
+          reviewedFiles={new Set()}
+          onToggleReviewed={vi.fn()}
+          onToggleFolderReviewed={vi.fn()}
+          selectedFileIndex={0}
+        />,
+      );
+
+      // Selecting src/a/one.ts auto-expanded its ancestors; every real node
+      // is expanded, so the button must offer a single-click collapse.
+      expect(screen.getByTitle('src/a/one.ts')).toBeInTheDocument();
+      expect(screen.getByTitle('src/a/two.ts')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTitle('Collapse all'));
+
+      expect(screen.queryByTitle('src/a/one.ts')).not.toBeInTheDocument();
+      expect(screen.queryByTitle('src/a/two.ts')).not.toBeInTheDocument();
+      scrollIntoViewSpy.mockRestore();
+    });
   });
 });
