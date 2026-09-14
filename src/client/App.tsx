@@ -1,5 +1,15 @@
-import { Columns, AlignLeft, Settings, PanelLeftClose, PanelLeft, Keyboard } from 'lucide-react';
+import {
+  Columns,
+  AlignLeft,
+  Focus,
+  MessageSquarePlus,
+  Settings,
+  PanelLeftClose,
+  PanelLeft,
+  Keyboard,
+} from 'lucide-react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useHotkeys } from 'react-hotkeys-hook';
 
 import {
   type DiffCommentThread,
@@ -26,6 +36,7 @@ import { CommentsListModal } from './components/CommentsListModal';
 import { DiffQuickMenu } from './components/DiffQuickMenu';
 import { DiffViewer } from './components/DiffViewer';
 import { FileList } from './components/FileList';
+import { GeneralCommentsCard } from './components/GeneralCommentsCard';
 import { GitHubIcon } from './components/GitHubIcon';
 import { HelpModal } from './components/HelpModal';
 import { Logo } from './components/Logo';
@@ -34,6 +45,7 @@ import { RevisionDetailModal } from './components/RevisionDetailModal';
 import { SettingsModal } from './components/SettingsModal';
 import { SparkleAnimation } from './components/SparkleAnimation';
 import { WordHighlightProvider } from './contexts/WordHighlightContext';
+import type { CursorPosition } from './hooks/keyboardNavigation';
 import { useAppearanceSettings } from './hooks/useAppearanceSettings';
 import { useDiffComments } from './hooks/useDiffComments';
 import { useExpandedLines, type MergedChunk } from './hooks/useExpandedLines';
@@ -48,6 +60,7 @@ import { copyTextToClipboard } from './utils/clipboard';
 import { getFileElementId } from './utils/domUtils';
 import { findCommentPosition } from './utils/navigation/positionHelpers';
 import { resolveEventSourceUrl } from './utils/eventSourceUrl';
+import { splitFilePath } from './utils/filePath';
 import {
   EMPTY_MERGED_CHUNKS_STATE,
   buildMergedChunksState,
@@ -60,9 +73,13 @@ const EMPTY_MERGED_CHUNKS: MergedChunk[] = [];
 const DIFF_VIEW_MODE_STORAGE_KEY = 'difit.diffViewMode';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'difit.sidebarWidth';
 const SIDEBAR_OPEN_STORAGE_KEY = 'difit.sidebarOpen';
+const FOCUS_MODE_STORAGE_KEY = 'difit.focusMode';
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 600;
 const SIDEBAR_DEFAULT_WIDTH = 280;
+// A file counts as active once its top edge reaches this far below the top of
+// the diff scroll container.
+const ACTIVE_FILE_SCROLL_OFFSET_PX = 60;
 
 const parseDiffViewMode = (value: unknown): DiffViewMode | null => {
   switch (value) {
@@ -126,6 +143,22 @@ const getStoredSidebarOpen = (): boolean | null => {
 
 const getInitialFileTreeOpen = () => getStoredSidebarOpen() ?? true;
 
+const getStoredFocusMode = (): boolean | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  const stored = window.localStorage.getItem(FOCUS_MODE_STORAGE_KEY);
+  if (stored === 'true') {
+    return true;
+  }
+  if (stored === 'false') {
+    return false;
+  }
+  return null;
+};
+
+const getInitialFocusMode = () => getStoredFocusMode() ?? false;
+
 function App() {
   const [diffData, setDiffData] = useState<DiffResponse | null>(null);
   const [diffDataVersion, setDiffDataVersion] = useState(0);
@@ -137,14 +170,19 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(getInitialSidebarWidth);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFileTreeOpen, setIsFileTreeOpen] = useState(getInitialFileTreeOpen);
+  const [isFocusMode, setIsFocusMode] = useState(getInitialFocusMode);
   const [isDragging, setIsDragging] = useState(false);
   const [showSparkles, setShowSparkles] = useState(false);
   const [hasTriggeredSparkles, setHasTriggeredSparkles] = useState(false);
   const [isCommentsListOpen, setIsCommentsListOpen] = useState(false);
+  const [isGeneralFormOpen, setIsGeneralFormOpen] = useState(false);
   const [isRevisionModalOpen, setIsRevisionModalOpen] = useState(false);
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const collapsedInitializedRef = useRef(false);
   const diffScrollContainerRef = useRef<HTMLElement | null>(null);
+  // The file the user is currently looking at, fed by the keyboard cursor,
+  // file-tree clicks, and the diff scroll position (scrollspy).
+  const [activeFileIndex, setActiveFileIndex] = useState<number | null>(null);
 
   // Revision selector state
   const [revisionOptions, setRevisionOptions] = useState<RevisionsResponse | null>(null);
@@ -188,6 +226,7 @@ function App() {
     threads,
     replaceThreads,
     addThread,
+    addGeneralThread,
     replyToThread,
     removeThread,
     removeMessage,
@@ -342,6 +381,13 @@ function App() {
     setDiffData,
   });
 
+  // `toggleFileReviewed` needs to steer the keyboard cursor, but it is defined
+  // before `useKeyboardNavigation` returns those helpers — indirect through
+  // refs that are refreshed after each render.
+  const rememberFilePositionRef = useRef<(fileIndex: number) => void>(() => {});
+  const setCursorPositionRef = useRef<(position: CursorPosition | null) => void>(() => {});
+  const cursorRef = useRef<CursorPosition | null>(null);
+
   const toggleFileReviewed = useCallback(
     async (filePath: string) => {
       if (!diffData) return;
@@ -370,15 +416,66 @@ function App() {
         return newSet;
       });
 
-      if (shouldScrollToHeader) {
+      // In focus mode, marking the FOCUSED file viewed advances focus to the
+      // next unviewed file strictly after the active one (no wrap; stays put
+      // if none remains). Ticking an unrelated file's checkbox only updates
+      // its viewed state. `viewedFiles` may be stale here, so the just-viewed
+      // file is skipped explicitly.
+      let advancedFileIndex: number | null = null;
+      if (isFocusMode && !wasViewed && diffData.files[activeFileIndex ?? -1]?.path === filePath) {
+        for (
+          let nextIndex = (activeFileIndex ?? 0) + 1;
+          nextIndex < diffData.files.length;
+          nextIndex++
+        ) {
+          const candidate = diffData.files[nextIndex];
+          if (!candidate || candidate.path === filePath) continue;
+          if (viewedFiles.has(candidate.path)) continue;
+          advancedFileIndex = nextIndex;
+          break;
+        }
+      }
+
+      if (advancedFileIndex !== null) {
+        setActiveFileIndex(advancedFileIndex);
+        // Move the remembered navigation position — and, while keyboard
+        // navigation is active, the cursor itself — along with the focus so
+        // the cross-file cursor effect does not see a stale cursor and revert
+        // the advance.
+        rememberFilePositionRef.current(advancedFileIndex);
+        if (cursorRef.current !== null) {
+          setCursorPositionRef.current({
+            fileIndex: advancedFileIndex,
+            chunkIndex: 0,
+            lineIndex: 0,
+            side: diffMode === 'split' ? 'left' : 'right',
+          });
+        }
+        // Start the newly focused file from the top, like the other
+        // focus-switch paths.
+        requestAnimationFrame(() => {
+          const scrollContainer = diffScrollContainerRef.current;
+          if (scrollContainer) {
+            scrollContainer.scrollTop = 0;
+          }
+        });
+      }
+
+      // The header re-anchor only makes sense in list mode: in focus mode the
+      // advance above already reset the scroll, and the readiness loop behind
+      // this scroll can never pass once the old wrapper left the DOM.
+      if (shouldScrollToHeader && advancedFileIndex === null) {
         setTimeout(() => {
           scrollFileIntoDiffContainer(filePath);
         }, 100);
       }
     },
     [
+      activeFileIndex,
       diffData,
+      diffMode,
       isFileScrolledPastContainerTop,
+      isFocusMode,
       scrollFileIntoDiffContainer,
       toggleFileViewed,
       viewedFiles,
@@ -440,6 +537,34 @@ function App() {
   const handleMobileFileSelected = useCallback(() => {
     setIsFileTreeOpen(false);
   }, []);
+
+  // File-tree clicks scroll the diff to the file and make it the active one.
+  // In focus mode the click switches the focused file instead: only that file
+  // is in the DOM, so a positional scroll is meaningless — reset to the top.
+  const handleScrollToFile = useCallback(
+    (filePath: string) => {
+      const fileIndex = diffData?.files.findIndex((file) => file.path === filePath) ?? -1;
+
+      if (isFocusMode) {
+        if (fileIndex !== -1) {
+          setActiveFileIndex(fileIndex);
+        }
+        requestAnimationFrame(() => {
+          const scrollContainer = diffScrollContainerRef.current;
+          if (scrollContainer) {
+            scrollContainer.scrollTop = 0;
+          }
+        });
+        return;
+      }
+
+      scrollFileIntoDiffContainer(filePath);
+      if (fileIndex !== -1) {
+        setActiveFileIndex(fileIndex);
+      }
+    },
+    [diffData, isFocusMode, scrollFileIntoDiffContainer],
+  );
 
   const handleDiffModeChange = useCallback((mode: DiffViewMode) => {
     setDiffMode(mode);
@@ -517,14 +642,19 @@ function App() {
         id: thread.id,
         file: thread.filePath,
         line:
-          typeof thread.position.line === 'number'
-            ? thread.position.line
-            : ([thread.position.line.start, thread.position.line.end] as [number, number]),
-        side: thread.position.side,
+          thread.position === undefined
+            ? null
+            : typeof thread.position.line === 'number'
+              ? thread.position.line
+              : ([thread.position.line.start, thread.position.line.end] as [number, number]),
+        side: thread.position?.side,
         createdAt: thread.createdAt,
         updatedAt: thread.updatedAt,
         codeContent: thread.codeSnapshot?.content,
-        isOutdated: isThreadOutdated(thread, fileLineIndexByPath.get(thread.filePath)),
+        isOutdated:
+          thread.filePath === null
+            ? false
+            : isThreadOutdated(thread, fileLineIndexByPath.get(thread.filePath)),
         messages: thread.messages,
       })),
     [threads, fileLineIndexByPath],
@@ -536,6 +666,8 @@ function App() {
   const threadsByFile = useMemo(() => {
     const map = new Map<string, CommentThread[]>();
     normalizedThreads.forEach((thread) => {
+      // General (file-independent) threads are not anchored to any file.
+      if (thread.file === null) return;
       const entry = map.get(thread.file);
       if (entry) {
         entry.push(thread);
@@ -545,6 +677,11 @@ function App() {
     });
     return map;
   }, [normalizedThreads]);
+  // General (file-independent) threads render in the pinned card above the files.
+  const generalThreads = useMemo(
+    () => normalizedThreads.filter((thread) => thread.file === null),
+    [normalizedThreads],
+  );
 
   // State to trigger comment creation from keyboard
   const [commentTrigger, setCommentTrigger] = useState<{
@@ -614,6 +751,14 @@ function App() {
       },
     });
 
+  // Keep the indirect refs used by `toggleFileReviewed` (declared above the
+  // hook call) pointed at the latest helpers and cursor state.
+  useEffect(() => {
+    rememberFilePositionRef.current = rememberFilePosition;
+    setCursorPositionRef.current = setCursorPosition;
+    cursorRef.current = cursor;
+  }, [rememberFilePosition, setCursorPosition, cursor]);
+
   // Viewed button in the diff header: silently remember the toggled file as
   // the navigation position, so keyboard navigation resumes from it without
   // showing any keyboard UI for a mouse interaction
@@ -641,6 +786,203 @@ function App() {
       setCursorPosition(cursor);
     });
   }, [cursor, diffData, ensureFilesRenderedUpTo, renderedFilePaths, setCursorPosition]);
+
+  // Keyboard cursor moves drive the active file. Key on the file index (not
+  // the cursor object) so line-level cursor moves don't retrigger this.
+  const cursorFileIndex = cursor?.fileIndex ?? null;
+  useEffect(() => {
+    if (cursorFileIndex === null) return;
+    setActiveFileIndex(cursorFileIndex);
+  }, [cursorFileIndex]);
+
+  // A fresh diff invalidates the active file: keep a still-valid index,
+  // otherwise fall back to the first file (or null for an empty diff).
+  useEffect(() => {
+    const fileCount = diffData?.files.length ?? 0;
+    setActiveFileIndex((prev) =>
+      prev !== null && prev >= 0 && prev < fileCount ? prev : fileCount > 0 ? 0 : null,
+    );
+  }, [diffData]);
+
+  // Scrollspy is disabled while focus mode pins the active file: the tree stops
+  // tracking scroll position and keyboard/tree navigation drives it instead.
+  const isScrollspyEnabled = !isFocusMode;
+  useEffect(() => {
+    if (!isScrollspyEnabled) return;
+
+    const scrollContainer = diffScrollContainerRef.current;
+    if (!scrollContainer || !diffData || diffData.files.length === 0) return;
+
+    let frameId: number | null = null;
+    const handleScroll = () => {
+      if (frameId !== null) return;
+      frameId = requestAnimationFrame(() => {
+        frameId = null;
+        const activationLine =
+          scrollContainer.getBoundingClientRect().top + ACTIVE_FILE_SCROLL_OFFSET_PX;
+
+        const fileElements = new Map<string, HTMLElement>();
+        scrollContainer.querySelectorAll<HTMLElement>('[data-file-path]').forEach((element) => {
+          const filePath = element.dataset.filePath;
+          if (filePath) {
+            fileElements.set(filePath, element);
+          }
+        });
+
+        // The active file is the last one (in diffData.files order) whose top
+        // edge has reached the activation line; the first file if none has.
+        let lastReachedFileIndex: number | null = null;
+        diffData.files.forEach((file, fileIndex) => {
+          const element = fileElements.get(file.path);
+          if (element && element.getBoundingClientRect().top <= activationLine) {
+            lastReachedFileIndex = fileIndex;
+          }
+        });
+
+        setActiveFileIndex(lastReachedFileIndex ?? 0);
+      });
+    };
+
+    scrollContainer.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      scrollContainer.removeEventListener('scroll', handleScroll);
+      if (frameId !== null) {
+        cancelAnimationFrame(frameId);
+      }
+    };
+  }, [diffData, diffScrollContainerRef, isScrollspyEnabled]);
+
+  // Focus mode entry/invalidation: guarantee there is a focused file, that it
+  // is actually rendered, and that it is not stuck collapsed.
+  useEffect(() => {
+    if (!isFocusMode || !diffData || diffData.files.length === 0) return;
+
+    const focusedIndex = activeFileIndex ?? 0;
+    const focusedFile = diffData.files[focusedIndex];
+    if (!focusedFile) return;
+
+    if (activeFileIndex === null) {
+      setActiveFileIndex(0);
+    }
+    ensureFileRendered(focusedFile.path);
+    setCollapsedFiles((prev) => {
+      if (!prev.has(focusedFile.path)) return prev;
+      const next = new Set(prev);
+      next.delete(focusedFile.path);
+      return next;
+    });
+  }, [isFocusMode, diffData, activeFileIndex, ensureFileRendered]);
+
+  // In focus mode the keyboard cursor crossing into another file switches the
+  // focused file: render the target, un-collapse it, and start it from the top.
+  useEffect(() => {
+    if (!isFocusMode || !cursor || !diffData) return;
+    if (cursor.fileIndex < 0 || cursor.fileIndex >= diffData.files.length) return;
+    if (cursor.fileIndex === activeFileIndex) return;
+
+    setActiveFileIndex(cursor.fileIndex);
+    const targetPath = diffData.files[cursor.fileIndex]?.path;
+    if (targetPath) {
+      ensureFileRendered(targetPath);
+      setCollapsedFiles((prev) => {
+        if (!prev.has(targetPath)) return prev;
+        const next = new Set(prev);
+        next.delete(targetPath);
+        return next;
+      });
+    }
+    requestAnimationFrame(() => {
+      const scrollContainer = diffScrollContainerRef.current;
+      if (scrollContainer) {
+        scrollContainer.scrollTop = 0;
+      }
+    });
+  }, [isFocusMode, cursor, diffData, activeFileIndex, ensureFileRendered]);
+
+  // Focus mode renders exactly one file wrapper: the active one. Original
+  // fileIndex values are preserved so cursor/fileIndex comparisons stay valid.
+  const visibleFileEntries = useMemo(() => {
+    if (!diffData) {
+      return [];
+    }
+    if (!isFocusMode) {
+      return diffData.files.map((file, fileIndex) => ({ file, fileIndex }));
+    }
+    if (
+      activeFileIndex === null ||
+      activeFileIndex < 0 ||
+      activeFileIndex >= diffData.files.length
+    ) {
+      return [];
+    }
+    const focusedFile = diffData.files[activeFileIndex];
+    return focusedFile ? [{ file: focusedFile, fileIndex: activeFileIndex }] : [];
+  }, [diffData, isFocusMode, activeFileIndex]);
+
+  // Focus-mode prev/next navigation for the diff header. Clamped, never wraps.
+  const focusNav = useMemo(() => {
+    if (!isFocusMode || !diffData || diffData.files.length === 0) {
+      return undefined;
+    }
+    const total = diffData.files.length;
+    const currentIndex = activeFileIndex ?? 0;
+
+    const goToIndex = (nextIndex: number) => {
+      const clampedIndex = Math.min(total - 1, Math.max(0, nextIndex));
+      if (clampedIndex === currentIndex) return;
+      const targetPath = diffData.files[clampedIndex]?.path;
+      if (!targetPath) return;
+
+      setActiveFileIndex(clampedIndex);
+      ensureFileRendered(targetPath);
+      requestAnimationFrame(() => {
+        const scrollContainer = diffScrollContainerRef.current;
+        if (scrollContainer) {
+          scrollContainer.scrollTop = 0;
+        }
+      });
+    };
+
+    return {
+      position: currentIndex + 1,
+      total,
+      onPrev: () => goToIndex(currentIndex - 1),
+      onNext: () => goToIndex(currentIndex + 1),
+    };
+  }, [isFocusMode, diffData, activeFileIndex, ensureFileRendered]);
+
+  // Esc exits focus mode (when no modal is open and nothing is being typed
+  // into) and re-anchors the list view on the file that was focused.
+  useHotkeys(
+    'esc',
+    () => {
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLElement) {
+        const tagName = activeElement.tagName.toLowerCase();
+        if (tagName === 'input' || tagName === 'textarea' || activeElement.isContentEditable) {
+          return;
+        }
+      }
+
+      const focusedPath = diffData?.files[activeFileIndex ?? 0]?.path;
+      setIsFocusMode(false);
+      if (focusedPath) {
+        scrollFileIntoDiffContainer(focusedPath);
+      }
+    },
+    {
+      enabled:
+        isFocusMode &&
+        !isSettingsOpen &&
+        !isCommentsListOpen &&
+        !isRevisionModalOpen &&
+        !isHelpOpen &&
+        // The open general-comment form closes first via its own Escape
+        // handling; exiting focus mode at the same time would swallow it.
+        !isGeneralFormOpen,
+    },
+    [activeFileIndex, diffData, isGeneralFormOpen, scrollFileIntoDiffContainer],
+  );
 
   const handleLineClick = useCallback(
     (fileIndex: number, chunkIndex: number, lineIndex: number, side: 'left' | 'right') => {
@@ -813,6 +1155,15 @@ function App() {
         }
       }
 
+      if (typeof client.focusMode === 'boolean') {
+        setIsFocusMode(client.focusMode);
+      } else {
+        const localFocusMode = getStoredFocusMode();
+        if (localFocusMode !== null) {
+          seed.focusMode = localFocusMode;
+        }
+      }
+
       if (Object.keys(seed).length > 0) {
         saveClientSettings(seed);
       }
@@ -851,6 +1202,20 @@ function App() {
     }
     saveClientSettings({ sidebarOpen: isFileTreeOpen });
   }, [isFileTreeOpen]);
+
+  const skipInitialFocusModeSaveRef = useRef(true);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(FOCUS_MODE_STORAGE_KEY, String(isFocusMode));
+    } catch {
+      // Ignore localStorage errors (e.g. disabled storage).
+    }
+    if (skipInitialFocusModeSaveRef.current) {
+      skipInitialFocusModeSaveRef.current = false;
+      return;
+    }
+    saveClientSettings({ focusMode: isFocusMode });
+  }, [isFocusMode]);
 
   // Fetch revision options on mount
   useEffect(() => {
@@ -1071,6 +1436,24 @@ function App() {
     [addThread],
   );
 
+  const handleOpenGeneralCommentForm = useCallback(() => {
+    setIsGeneralFormOpen(true);
+    // The general card is pinned to the top of the diff area, so reveal it.
+    const scrollContainer = diffScrollContainerRef.current;
+    if (scrollContainer) {
+      scrollContainer.scrollTop = 0;
+    }
+  }, []);
+
+  const handleAddGeneralComment = useCallback(
+    (body: string): Promise<void> => {
+      addGeneralThread(body);
+      setIsGeneralFormOpen(false);
+      return Promise.resolve();
+    },
+    [addGeneralThread],
+  );
+
   const handleCopyAllComments = async () => {
     try {
       const prompt = generateAllCommentsPrompt({
@@ -1098,6 +1481,13 @@ function App() {
 
   const handleNavigateToComment = (thread: CommentThread) => {
     if (!diffData) return;
+
+    // General (file-independent) threads have no diff position to scroll to;
+    // scroll the pinned general comments card into view instead.
+    if (thread.file === null) {
+      document.getElementById('general-comments')?.scrollIntoView({ block: 'start' });
+      return;
+    }
 
     const position = findCommentPosition(thread, diffData.files);
     if (position) {
@@ -1235,6 +1625,15 @@ function App() {
                 {isFileTreeOpen ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
               </button>
               <button
+                type="button"
+                onClick={handleOpenGeneralCommentForm}
+                className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
+                title="Add general comment"
+                aria-label="Add general comment"
+              >
+                <MessageSquarePlus size={18} />
+              </button>
+              <button
                 onClick={() => setIsSettingsOpen(true)}
                 className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
                 title="Settings"
@@ -1286,6 +1685,40 @@ function App() {
                   </button>
                 </div>
               )}
+              <button
+                type="button"
+                onClick={() => {
+                  if (!isFocusMode) {
+                    // Entering: render the focused file synchronously so the
+                    // deferred-render placeholder never flashes for a frame
+                    // before the focus-mode entry effect runs.
+                    const pathToFocus = diffData.files[activeFileIndex ?? 0]?.path;
+                    if (pathToFocus) {
+                      ensureFileRendered(pathToFocus);
+                    }
+                    setIsFocusMode(true);
+                    return;
+                  }
+                  // Exiting via the button mirrors the Esc path: re-anchor the
+                  // list view on the file that was focused.
+                  const focusedPath = diffData.files[activeFileIndex ?? 0]?.path;
+                  setIsFocusMode(false);
+                  if (focusedPath) {
+                    scrollFileIntoDiffContainer(focusedPath);
+                  }
+                }}
+                disabled={diffData.files.length === 0}
+                className={`p-2 rounded transition-colors ${
+                  isFocusMode
+                    ? 'bg-github-bg-tertiary text-github-text-primary'
+                    : 'text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary'
+                } ${diffData.files.length === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                title="Focus mode — show only the active file (Esc to exit)"
+                aria-pressed={isFocusMode}
+                aria-label="Toggle focus mode"
+              >
+                <Focus size={16} />
+              </button>
               <Checkbox
                 checked={ignoreWhitespace}
                 onChange={setIgnoreWhitespace}
@@ -1426,13 +1859,13 @@ function App() {
               <div className="flex-1 overflow-y-auto">
                 <FileList
                   files={diffData.files}
-                  onScrollToFile={scrollFileIntoDiffContainer}
+                  onScrollToFile={handleScrollToFile}
                   onFileSelected={isMobile ? handleMobileFileSelected : undefined}
                   comments={normalizedThreads}
                   reviewedFiles={viewedFiles}
                   onToggleReviewed={toggleFileReviewed}
                   onToggleFolderReviewed={toggleFolderReviewed}
-                  selectedFileIndex={cursor?.fileIndex ?? null}
+                  selectedFileIndex={activeFileIndex}
                 />
               </div>
               {!isMobile && (
@@ -1475,12 +1908,28 @@ function App() {
             ref={diffScrollContainerRef}
             className={`flex-1 overflow-y-auto ${showMobileCommentsBar ? 'pb-16' : ''}`}
           >
-            {diffData.files.map((file, fileIndex) => {
+            {/* General (file-independent) threads stay pinned above the files
+                in both list and focus mode. */}
+            <GeneralCommentsCard
+              threads={generalThreads}
+              isFormOpen={isGeneralFormOpen}
+              onFormOpenChange={setIsGeneralFormOpen}
+              onAddComment={handleAddGeneralComment}
+              showAuthorBadges={showAuthorBadges}
+              onGenerateThreadPrompt={handleGenerateThreadPrompt}
+              onRemoveThread={removeThread}
+              onReplyToThread={handleReplyToThread}
+              onRemoveMessage={removeMessage}
+              onUpdateMessage={updateMessage}
+              syntaxTheme={settings.syntaxTheme}
+            />
+            {visibleFileEntries.map(({ file, fileIndex }) => {
               const fileThreads = threadsByFile.get(file.path) ?? EMPTY_COMMENT_THREADS;
               const mergedChunks =
                 getMergedChunksForVersion(mergedChunksState, diffDataVersion, file.path) ??
                 EMPTY_MERGED_CHUNKS;
               const isRendered = renderedFilePaths.has(file.path);
+              const { directory: fileDirectory, basename: fileBasename } = splitFilePath(file.path);
               return (
                 <div
                   key={file.path}
@@ -1504,6 +1953,7 @@ function App() {
                       threads={fileThreads}
                       showAuthorBadges={showAuthorBadges}
                       diffMode={diffMode}
+                      focusNav={focusNav}
                       reviewedFiles={viewedFiles}
                       isChangedSinceViewed={changedSinceViewedFiles.has(file.path)}
                       onToggleReviewed={handleViewedButtonToggle}
@@ -1542,8 +1992,21 @@ function App() {
                           <div className="text-xs uppercase tracking-wide text-github-text-muted">
                             Deferred Rendering
                           </div>
-                          <div className="text-sm font-mono text-github-text-primary truncate">
-                            {file.path}
+                          <div className="text-sm font-mono text-github-text-primary min-w-0 flex items-baseline overflow-hidden">
+                            {fileDirectory !== '' && (
+                              <>
+                                <span
+                                  className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+                                  style={{ direction: 'rtl' }}
+                                >
+                                  {fileDirectory}
+                                </span>
+                                <span className="text-github-text-muted shrink-0">/</span>
+                              </>
+                            )}
+                            <span className="text-github-text-primary font-medium shrink-0 whitespace-nowrap">
+                              {fileBasename}
+                            </span>
                           </div>
                         </div>
                         <button

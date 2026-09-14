@@ -176,7 +176,14 @@ function getPositionKey(position: DiffCommentPosition): string {
   return `${position.side}:${position.line.start}-${position.line.end}`;
 }
 
-function positionsMatch(left: DiffCommentPosition, right: DiffCommentPosition): boolean {
+function positionsMatch(
+  left: DiffCommentPosition | undefined,
+  right: DiffCommentPosition | undefined,
+): boolean {
+  if (left === undefined || right === undefined) {
+    return false;
+  }
+
   return getPositionKey(left) === getPositionKey(right);
 }
 
@@ -294,7 +301,11 @@ function cloneLineRange(line: DiffLineRange): DiffLineRange {
   };
 }
 
-function clonePosition(position: DiffCommentPosition): DiffCommentPosition {
+function clonePosition(position: DiffCommentPosition | undefined): DiffCommentPosition | undefined {
+  if (position === undefined) {
+    return undefined;
+  }
+
   return {
     side: position.side,
     line: cloneLineRange(position.line),
@@ -353,7 +364,17 @@ function threadsMatch(left: DiffCommentThread, right: DiffCommentThread): boolea
     return true;
   }
 
-  if (left.filePath !== right.filePath || !positionsMatch(left.position, right.position)) {
+  if (left.filePath !== right.filePath) {
+    return false;
+  }
+
+  // General threads (no position) have no file/line anchor, so their identity
+  // is the id alone: distinct ids never merge, even with identical bodies.
+  if (left.position === undefined && right.position === undefined) {
+    return false;
+  }
+
+  if (!positionsMatch(left.position, right.position)) {
     return false;
   }
 

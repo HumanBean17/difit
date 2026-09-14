@@ -30,11 +30,11 @@ In focus mode the focused file is authoritative: scroll updates are suppressed w
 - A Focus/List toggle in the top toolbar beside the Split/Unified switch. Entering focuses `activeFileIndex` (the first file if none is active).
 - The diff area renders only the focused file; all `DiffViewer` props are unchanged.
 - File-to-file navigation inside focus mode:
-  - `]` / `[` keep their meaning and switch the focused file, clamped at the ends.
+  - `]` / `[` keep their meaning and switch the focused file, preserving their existing wrap-around behavior (last↔first), consistent with list mode; the chevron buttons clamp instead.
   - Prev/next chevron buttons with a "3 / 27" position indicator in the focused file's header.
   - Clicking a file-tree row focuses that file.
 - `Esc` exits focus mode and scrolls the list to the focused file.
-- Line/chunk navigation (`j`/`k`, `n`/`p`) and commenting (`c`) work unchanged within the focused file; navigation that would cross a file boundary simply stops, while `]`/`[` hop files.
+- Line/chunk navigation (`j`/`k`, `n`/`p`) and commenting (`c`) work unchanged within the focused file; line navigation that would cross a file boundary moves the cursor into the adjacent file and focus follows it, while `]`/`[` hop files explicitly.
 - Marking the focused file viewed (`v` or the Viewed button) auto-focuses the next unviewed file; if none remain, the current file stays focused and the existing completion animation fires.
 - With an empty diff the toggle is a no-op.
 

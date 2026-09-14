@@ -4,6 +4,7 @@ import type { CommentImport, DiffCommentThread } from '../types/diff';
 
 import {
   mergeCommentImports,
+  mergeCommentThreads,
   parseCommentImportValue,
   serializeCommentImports,
 } from './commentImports';
@@ -38,6 +39,36 @@ function createThread({
         body,
         author: 'User',
         createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt,
+      },
+    ],
+  };
+}
+
+function createGeneralThread({
+  id,
+  body,
+  createdAt = '2024-01-01T00:00:00.000Z',
+  updatedAt = '2024-01-01T00:00:00.000Z',
+  messages,
+}: {
+  id: string;
+  body: string;
+  createdAt?: string;
+  updatedAt?: string;
+  messages?: DiffCommentThread['messages'];
+}): DiffCommentThread {
+  return {
+    id,
+    filePath: null,
+    createdAt,
+    updatedAt,
+    messages: messages ?? [
+      {
+        id,
+        body,
+        author: 'User',
+        createdAt,
         updatedAt,
       },
     ],
@@ -259,6 +290,124 @@ describe('commentImports', () => {
       expect(result.threads).toEqual([]);
       expect(result.warnings).toHaveLength(1);
       expect(result.warnings[0]).toContain('Skipped reply import');
+    });
+  });
+
+  describe('general threads', () => {
+    it('merging general threads with different ids keeps both threads', () => {
+      const stored = createGeneralThread({ id: 'general-1', body: 'ship it' });
+      const incoming = createGeneralThread({ id: 'general-2', body: 'ship it' });
+
+      const result = mergeCommentThreads([stored], [incoming]);
+
+      expect(result.threads).toHaveLength(2);
+      expect(result.threads.map((thread) => thread.id)).toEqual(['general-1', 'general-2']);
+    });
+
+    it('merging general threads with the same id merges their messages', () => {
+      const stored = createGeneralThread({
+        id: 'general-1',
+        body: 'root',
+        messages: [
+          {
+            id: 'general-1',
+            body: 'root',
+            author: 'User',
+            createdAt: '2024-01-01T00:00:00.000Z',
+            updatedAt: '2024-01-01T00:00:00.000Z',
+          },
+        ],
+      });
+      const incoming = createGeneralThread({
+        id: 'general-1',
+        body: 'root',
+        updatedAt: '2024-01-02T00:00:00.000Z',
+        messages: [
+          {
+            id: 'general-1',
+            body: 'root',
+            author: 'User',
+            createdAt: '2024-01-01T00:00:00.000Z',
+            updatedAt: '2024-01-01T00:00:00.000Z',
+          },
+          {
+            id: 'reply-1',
+            body: 'a reply',
+            author: 'User',
+            createdAt: '2024-01-02T00:00:00.000Z',
+            updatedAt: '2024-01-02T00:00:00.000Z',
+          },
+        ],
+      });
+
+      const result = mergeCommentThreads([stored], [incoming]);
+
+      expect(result.threads).toHaveLength(1);
+      expect(result.threads[0]?.id).toBe('general-1');
+      expect(result.threads[0]?.messages.map((message) => message.id)).toEqual([
+        'general-1',
+        'reply-1',
+      ]);
+    });
+
+    it('preserves filePath null and an absent position when cloning and merging general threads', () => {
+      const result = mergeCommentThreads(
+        [createGeneralThread({ id: 'general-1', body: 'ship it' })],
+        [],
+      );
+
+      expect(result.threads).toHaveLength(1);
+      expect(result.threads[0]?.filePath).toBeNull();
+      expect(result.threads[0]?.position).toBeUndefined();
+
+      // JSON round-trip (as persisted/synced) drops the undefined position.
+      const roundTripped = JSON.parse(JSON.stringify(result.threads[0])) as DiffCommentThread;
+      expect(roundTripped.filePath).toBeNull();
+      expect(Object.keys(roundTripped).includes('position')).toBe(false);
+    });
+
+    it('never merges a general thread with a file-based thread', () => {
+      const general = createGeneralThread({ id: 'general-1', body: 'same body' });
+      const fileThread = createThread({ id: 'file-1', body: 'same body' });
+
+      const generalFirst = mergeCommentThreads([general], [fileThread]);
+      expect(generalFirst.threads).toHaveLength(2);
+      expect(generalFirst.threads.map((thread) => thread.id).sort()).toEqual([
+        'file-1',
+        'general-1',
+      ]);
+
+      const fileFirst = mergeCommentThreads([fileThread], [general]);
+      expect(fileFirst.threads).toHaveLength(2);
+      expect(fileFirst.threads.map((thread) => thread.id).sort()).toEqual(['file-1', 'general-1']);
+    });
+
+    it('never merges a stored general thread with a file-based thread import', () => {
+      const general = createGeneralThread({ id: 'general-1', body: 'ship it' });
+
+      const result = mergeCommentImports(
+        [general],
+        [
+          {
+            type: 'thread',
+            id: 'file-import-1',
+            filePath: 'src/example.ts',
+            position: { side: 'new', line: 10 },
+            body: 'ship it',
+            author: 'User',
+          },
+        ],
+      );
+
+      expect(result.threads).toHaveLength(2);
+      expect(
+        result.threads.some((thread) => thread.id === 'general-1' && thread.filePath === null),
+      ).toBe(true);
+      expect(
+        result.threads.some(
+          (thread) => thread.id === 'file-import-1' && thread.filePath === 'src/example.ts',
+        ),
+      ).toBe(true);
     });
   });
 });

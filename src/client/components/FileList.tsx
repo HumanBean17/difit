@@ -12,7 +12,15 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
 } from 'lucide-react';
-import { memo, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+} from 'react';
 
 import { type DiffFile, type CommentThread } from '../../types/diff';
 import { isSafariBrowser } from '../utils/browser';
@@ -55,6 +63,22 @@ function getAllDirectoryPaths(node: TreeNode): string[] {
     paths.push(...getAllDirectoryPaths(child));
   });
   return paths;
+}
+
+/**
+ * Every directory prefix of a file path (`src/a/b.ts` -> `src`, `src/a`).
+ *
+ * Includes ALL prefixes because `buildFileTree` merges single-child
+ * directories into one node keyed by the deepest merged prefix; unioning all
+ * prefixes guarantees the selected file's ancestor nodes are expanded.
+ */
+function getAncestorDirectoryPaths(path: string): string[] {
+  const segments = path.split('/');
+  const ancestors: string[] = [];
+  for (let i = 1; i < segments.length; i++) {
+    ancestors.push(segments.slice(0, i).join('/'));
+  }
+  return ancestors;
 }
 
 function getReviewedDirectoryPaths(node: TreeNode, reviewedFiles: Set<string>): Set<string> {
@@ -170,6 +194,7 @@ export const FileList = memo(function FileList({
   );
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const dirContainerRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const fileRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const stickyContainerStyle = {
     '--dir-row-height': 'calc(var(--spacing, 0.25rem) * 9)',
   } as CSSProperties;
@@ -183,6 +208,8 @@ export const FileList = memo(function FileList({
   const commentCountMap = useMemo(() => {
     const counts = new Map<string, number>();
     comments.forEach((comment) => {
+      // General (file-independent) threads are not attached to any tree node.
+      if (comment.file === null) return;
       counts.set(comment.file, (counts.get(comment.file) ?? 0) + 1);
     });
     return counts;
@@ -246,6 +273,36 @@ export const FileList = memo(function FileList({
     );
   }, [fileTree, filterText]);
 
+  const selectedFilePath =
+    selectedFileIndex !== null ? (files[selectedFileIndex]?.path ?? null) : null;
+
+  // Keep the tree aligned with the active file: expand every ancestor of the
+  // selected file (expand-only — never collapse folders the user folded) and
+  // scroll the selected row into view within the tree.
+  useEffect(() => {
+    if (!selectedFilePath) return;
+
+    setExpandedDirs((prev) => {
+      const ancestors = getAncestorDirectoryPaths(selectedFilePath);
+      if (ancestors.every((directory) => prev.has(directory))) {
+        return prev;
+      }
+      const next = new Set(prev);
+      ancestors.forEach((directory) => next.add(directory));
+      return next;
+    });
+
+    // Wait a frame so rows revealed by the expansion above are mounted first.
+    const frameId = requestAnimationFrame(() => {
+      const treeScrollContainer = scrollContainerRef.current;
+      // Don't fight the user's own scrolling while they hover the tree.
+      if (!treeScrollContainer || treeScrollContainer.matches(':hover')) return;
+      fileRowRefs.current.get(selectedFilePath)?.scrollIntoView({ block: 'nearest' });
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [selectedFilePath]);
+
   const getFileIcon = (status: DiffFile['status']) => {
     switch (status) {
       case 'added':
@@ -272,7 +329,11 @@ export const FileList = memo(function FileList({
   };
 
   const allPaths = useMemo(() => getAllDirectoryPaths(fileTree), [fileTree]);
-  const isAllExpanded = expandedDirs.size === allPaths.length && allPaths.length > 0;
+  // Compare against the real node paths only: selection-driven auto-expansion
+  // also unions synthetic prefixes (e.g. `src` when the tree merged it into
+  // `src/a`), which no node owns and which would make a size comparison
+  // permanently false — requiring two clicks to collapse everything.
+  const isAllExpanded = allPaths.length > 0 && allPaths.every((path) => expandedDirs.has(path));
 
   const toggleAllDirectories = () => {
     // If all directories are expanded, collapse all. Otherwise, expand all.
@@ -410,8 +471,21 @@ export const FileList = memo(function FileList({
           } ${isSelected ? 'bg-github-bg-tertiary' : ''}`}
           data-file-row="true"
           data-tree-row="true"
+          data-active={isSelected ? 'true' : undefined}
           data-depth={depth}
-          style={{ paddingLeft: getTreeRowPaddingLeft(depth) }}
+          ref={(node) => {
+            if (node) {
+              fileRowRefs.current.set(file.path, node);
+            } else {
+              fileRowRefs.current.delete(file.path);
+            }
+          }}
+          style={{
+            paddingLeft: getTreeRowPaddingLeft(depth),
+            ...(isSelected
+              ? { boxShadow: 'inset 2px 0 0 0 var(--color-github-accent)' }
+              : undefined),
+          }}
           onClick={() => {
             onScrollToFile(file.path);
             onFileSelected?.();
@@ -429,7 +503,7 @@ export const FileList = memo(function FileList({
           <span
             className={`text-sm text-github-text-primary flex-1 overflow-hidden text-ellipsis whitespace-nowrap ${
               isReviewed ? 'line-through text-github-text-muted' : ''
-            }`}
+            } ${isSelected ? 'font-medium' : ''}`}
             title={node.file.path}
           >
             {node.name}

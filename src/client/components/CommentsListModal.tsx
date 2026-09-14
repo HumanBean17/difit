@@ -1,5 +1,5 @@
 import { X } from 'lucide-react';
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { Fragment, useEffect, useState, useRef, useCallback } from 'react';
 import { useHotkeys, useHotkeysContext } from 'react-hotkeys-hook';
 
 import type { CommentThread } from '../../types/diff';
@@ -39,12 +39,19 @@ export function CommentsListModal({
   const { enableScope, disableScope } = useHotkeysContext();
 
   const sortedThreads = [...comments].sort((a, b) => {
-    const fileCompare = a.file.localeCompare(b.file);
-    if (fileCompare !== 0) return fileCompare;
+    // General (file-independent) threads always sort before file threads.
+    if (a.file === null || b.file === null) {
+      if (a.file !== null) return 1;
+      if (b.file !== null) return -1;
+      // Both general: fall through to the createdAt ordering below.
+    } else {
+      const fileCompare = a.file.localeCompare(b.file);
+      if (fileCompare !== 0) return fileCompare;
+    }
 
     const aLine = Array.isArray(a.line) ? a.line[0] : a.line;
     const bLine = Array.isArray(b.line) ? b.line[0] : b.line;
-    if (aLine !== bLine) return aLine - bLine;
+    if (aLine !== bLine) return (aLine ?? 0) - (bLine ?? 0);
 
     return a.createdAt.localeCompare(b.createdAt);
   });
@@ -161,36 +168,49 @@ export function CommentsListModal({
             ) : (
               <>
                 <div className="space-y-2">
-                  {sortedThreads.map((thread, index) => (
-                    <div
-                      key={thread.id}
-                      ref={(el) => {
-                        commentRefs.current[index] = el;
-                      }}
-                      className={selectedIndex === index ? 'rounded ring-2 ring-blue-500' : ''}
-                    >
-                      <CommentThreadCard
-                        thread={thread}
-                        showAuthorBadges={showAuthorBadges}
-                        confirmRootAction={false}
-                        onGeneratePrompt={onGenerateThreadPrompt}
-                        onRemoveThread={(threadId) => {
-                          if (threadId === thread.id) {
-                            handleDeleteThread(thread);
-                          }
-                        }}
-                        onReplyToThread={onReplyToThread}
-                        onRemoveMessage={onRemoveMessage}
-                        onUpdateMessage={onUpdateMessage}
-                        syntaxTheme={syntaxTheme}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedIndex(index);
-                          handleThreadClick(thread);
-                        }}
-                      />
-                    </div>
-                  ))}
+                  {sortedThreads.map((thread, index) => {
+                    const isGeneral = thread.file === null;
+                    // General threads form a contiguous group at the top; show
+                    // the section label once, above the first of them.
+                    const showGeneralLabel =
+                      isGeneral && (index === 0 || sortedThreads[index - 1]?.file !== null);
+                    return (
+                      <Fragment key={thread.id}>
+                        {showGeneralLabel && (
+                          <div className="text-xs font-medium uppercase tracking-wide text-github-text-muted">
+                            General
+                          </div>
+                        )}
+                        <div
+                          ref={(el) => {
+                            commentRefs.current[index] = el;
+                          }}
+                          className={selectedIndex === index ? 'rounded ring-2 ring-blue-500' : ''}
+                        >
+                          <CommentThreadCard
+                            thread={thread}
+                            showAuthorBadges={showAuthorBadges}
+                            confirmRootAction={false}
+                            onGeneratePrompt={onGenerateThreadPrompt}
+                            onRemoveThread={(threadId) => {
+                              if (threadId === thread.id) {
+                                handleDeleteThread(thread);
+                              }
+                            }}
+                            onReplyToThread={onReplyToThread}
+                            onRemoveMessage={onRemoveMessage}
+                            onUpdateMessage={onUpdateMessage}
+                            syntaxTheme={syntaxTheme}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedIndex(index);
+                              handleThreadClick(thread);
+                            }}
+                          />
+                        </div>
+                      </Fragment>
+                    );
+                  })}
                 </div>
                 <div className="mt-4 border-t border-github-border pt-4 text-center text-xs text-github-text-secondary">
                   {selectedIndex + 1} of {sortedThreads.length} threads

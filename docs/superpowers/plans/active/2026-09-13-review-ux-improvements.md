@@ -25,6 +25,7 @@
 ### Task 1: Split file path helper + Java-friendly diff header
 
 **Files:**
+
 - Create: `src/client/utils/filePath.ts`
 - Test: `src/client/utils/filePath.test.ts`
 - Modify: `src/client/components/DiffViewerHeader.tsx` (the `<h2>` at ~line 79)
@@ -32,6 +33,7 @@
 - Modify: `src/client/App.tsx` (deferred-rendering placeholder, ~line 1546)
 
 **Interfaces:**
+
 - Consumes: `DiffFile` from `src/types/diff.ts` (existing).
 - Produces: `splitFilePath(path: string): { directory: string; basename: string }` — `directory` is everything before the final `/` (empty string when the path has no `/`), `basename` is the final segment. Exact cases: `splitFilePath('src/main/java/A.java')` → `{ directory: 'src/main/java', basename: 'A.java' }`; `splitFilePath('A.java')` → `{ directory: '', basename: 'A.java' }`; `splitFilePath('')` → `{ directory: '', basename: '' }`; `splitFilePath('a/b/')` → `{ directory: 'a/b', basename: '' }`. Later tasks and the placeholder display rely on this exact shape.
 
@@ -90,12 +92,14 @@ Run: `git add -A && git commit -m "feat(client): split long file paths into dimm
 ### Task 2: `activeFileIndex` foundation + scrollspy file tree
 
 **Files:**
+
 - Modify: `src/client/App.tsx` (state, cursor effect, tree-click handler, scroll listener, `FileList` prop)
 - Test: `src/client/App.test.tsx` (extend)
 - Modify: `src/client/components/FileList.tsx` (row styling, ancestor auto-expand, row reveal)
 - Test: `src/client/components/FileList.test.tsx` (extend)
 
 **Interfaces:**
+
 - Consumes: `FileList`'s existing `selectedFileIndex: number | null` prop; `useLazyDiffRendering`'s existing `scrollFileIntoDiffContainer`; `diffScrollContainerRef`.
 - Produces:
   - `App` state `activeFileIndex: number | null`, updated by: (1) keyboard cursor file changes, (2) file-tree row clicks, (3) a scroll listener on the diff scroll container. Later tasks consume it (Task 3 focus mode; Task 5 general-card scroll uses unrelated anchor).
@@ -148,6 +152,7 @@ Run: `git add -A && git commit -m "feat(client): track active file across scroll
 ### Task 3: Focus mode (single-file view)
 
 **Files:**
+
 - Modify: `src/client/App.tsx` (state + persistence, toolbar toggle, render filtering, cross-file cursor effect, viewed-advance, Esc exit, focusNav wiring)
 - Modify: `src/client/components/DiffViewer.tsx` (new optional prop, forwarded)
 - Modify: `src/client/components/DiffViewerHeader.tsx` (focus nav UI)
@@ -155,6 +160,7 @@ Run: `git add -A && git commit -m "feat(client): track active file across scroll
 - Modify: `src/client/components/HelpModal.tsx` (shortcut rows)
 
 **Interfaces:**
+
 - Consumes: `activeFileIndex` and its setters from Task 2; `ensureFileRendered`, `scrollFileIntoDiffContainer` from `useLazyDiffRendering`; `toggleFileViewed` state from `useViewedFiles`; `useHotkeys` from react-hotkeys-hook.
 - Produces:
   - `App` state `isFocusMode: boolean`, persisted under localStorage key `difit.focusMode` and hydrated/saved through `fetchClientSettings`/`saveClientSettings` under client key `focusMode` (mirroring the existing `sidebarOpen` pattern, including the skip-initial-mount save ref).
@@ -164,6 +170,7 @@ Run: `git add -A && git commit -m "feat(client): track active file across scroll
 - [ ] **Step 1: Write failing App focus-mode tests**
 
 Extend `App.test.tsx` with a multi-file diff:
+
 1. Toggling focus mode on renders exactly one `[data-file-path]` wrapper in the diff area (vs. N in list mode).
 2. The toolbar toggle button reflects enabled state; clicking again restores all N wrappers.
 3. `Escape` keydown exits focus mode (dispatch on document) when no modal is open and focus is not in an input/textarea.
@@ -214,6 +221,7 @@ Run: `git add -A && git commit -m "feat(client): add single-file focus mode with
 ### Task 4: General comments — data model and plumbing
 
 **Files:**
+
 - Modify: `src/types/diff.ts` (`DiffCommentThread`, `CommentThread`)
 - Modify: `src/client/hooks/useDiffComments.ts` (new `addGeneralThread`, null-safe normalize)
 - Test: extend `src/client/hooks/useDiffComments.test.ts`
@@ -227,6 +235,7 @@ Run: `git add -A && git commit -m "feat(client): add single-file focus mode with
 - Test: extend `src/server/server.test.ts`
 
 **Interfaces:**
+
 - Consumes: existing thread lifecycle methods of `useDiffComments`; existing server comment session shape.
 - Produces:
   - `DiffCommentThread.filePath: string | null` and `position?: DiffCommentPosition` — `filePath === null` (with no `position`, no `codeSnapshot`) identifies a general thread.
@@ -294,6 +303,7 @@ Run: `git add -A && git commit -m "feat: support general file-independent commen
 ### Task 5: General comments UI
 
 **Files:**
+
 - Create: `src/client/components/GeneralCommentsCard.tsx`
 - Test: `src/client/components/GeneralCommentsCard.test.tsx`
 - Modify: `src/client/App.tsx` (top-bar button, card wiring, navigation)
@@ -302,6 +312,7 @@ Run: `git add -A && git commit -m "feat: support general file-independent commen
 - Test: extend `src/client/components/CommentsListModal.test.tsx`
 
 **Interfaces:**
+
 - Consumes: `addGeneralThread` and the thread lifecycle callbacks from Task 4; `CommentThreadCard`, `CommentForm` (props as they exist today).
 - Produces:
   - `GeneralCommentsCard` props: `threads: CommentThread[]` (general only), `isFormOpen: boolean`, `onFormOpenChange: (open: boolean) => void`, `onAddComment: (body: string) => Promise<void>`, `showAuthorBadges?: boolean`, `syntaxTheme?: AppearanceSettings['syntaxTheme']`, and the standard lifecycle callbacks `onGenerateThreadPrompt: (thread: CommentThread) => string`, `onRemoveThread: (threadId: string) => void`, `onReplyToThread: (threadId: string, body: string) => Promise<void>`, `onRemoveMessage: (threadId: string, messageId: string) => void`, `onUpdateMessage: (threadId: string, messageId: string, newBody: string) => void`.
@@ -361,6 +372,7 @@ Run: `git add -A && git commit -m "feat(client): surface general comments via to
 **Files:** none new (verification only; fix fallout if any).
 
 **Interfaces:**
+
 - Consumes: everything from Tasks 1–5.
 - Produces: a verified branch ready for PR.
 

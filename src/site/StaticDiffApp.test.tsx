@@ -5,6 +5,16 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import StaticDiffApp from './StaticDiffApp';
 import type { StaticDiffDataset, StaticDiffManifest, StaticDiffSnapshot } from './types/staticDiff';
 
+// The diff header renders the file path split across directory and basename
+// spans, so locate the header <h2> by its combined text content.
+const getHeaderByPath = (path: string): HTMLElement =>
+  screen.getByText((_, element) => {
+    if (element?.tagName !== 'H2') {
+      return false;
+    }
+    return element.textContent === path;
+  });
+
 const staticDataset: StaticDiffDataset = {
   repository: 'difit',
   initialRevisionId: '1111111...2222222',
@@ -173,7 +183,7 @@ describe('StaticDiffApp', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('src/first.ts')).toBeInTheDocument();
+      expect(getHeaderByPath('src/first.ts')).toBeInTheDocument();
     });
   });
 
@@ -186,7 +196,7 @@ describe('StaticDiffApp', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('src/second.ts')).toBeInTheDocument();
+      expect(getHeaderByPath('src/second.ts')).toBeInTheDocument();
     });
   });
 
@@ -198,7 +208,7 @@ describe('StaticDiffApp', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('src/first.ts')).toBeInTheDocument();
+      expect(getHeaderByPath('src/first.ts')).toBeInTheDocument();
     });
 
     const response = await fetch('/api/diff');
@@ -214,7 +224,7 @@ describe('StaticDiffApp', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('src/first.ts')).toBeInTheDocument();
+      expect(getHeaderByPath('src/first.ts')).toBeInTheDocument();
     });
 
     const response = await fetch('/api/blob/src%2Ffirst.ts?ref=2222222');
@@ -231,7 +241,7 @@ describe('StaticDiffApp', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('src/second.ts')).toBeInTheDocument();
+      expect(getHeaderByPath('src/second.ts')).toBeInTheDocument();
     });
 
     const response = await fetch('/api/comments-json');

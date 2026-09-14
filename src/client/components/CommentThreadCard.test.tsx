@@ -73,6 +73,27 @@ describe('CommentThreadCard', () => {
     expect(screen.queryByTitle('Edit message')).not.toBeInTheDocument();
   });
 
+  it('renders a General location label for file-independent threads', () => {
+    render(
+      <CommentThreadCard
+        thread={{
+          ...mockThread,
+          file: null,
+          line: null,
+          codeContent: undefined,
+        }}
+        onGeneratePrompt={() => 'thread prompt'}
+        onRemoveThread={vi.fn()}
+        onReplyToThread={vi.fn().mockResolvedValue(undefined)}
+        onRemoveMessage={vi.fn()}
+        onUpdateMessage={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('General')).toBeInTheDocument();
+    expect(screen.queryByText(/null/)).not.toBeInTheDocument();
+  });
+
   it('shows an inline confirmation before resolving a root comment by default', async () => {
     const user = userEvent.setup();
     const onRemoveThread = vi.fn();

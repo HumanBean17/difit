@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom';
 
 import type { DiffFile } from '../../types/diff';
@@ -164,5 +164,111 @@ describe('FileList', () => {
 
     fireEvent.click(checkbox);
     expect(onToggleFolderReviewed).toHaveBeenCalledWith('src', false);
+  });
+
+  describe('active file row', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('re-expands collapsed ancestors of the selected file and reveals the row', async () => {
+      const props = {
+        files: [createFile('src/a.ts'), createFile('other/b.ts')],
+        onScrollToFile: vi.fn(),
+        comments: [],
+        reviewedFiles: new Set<string>(),
+        onToggleReviewed: vi.fn(),
+        onToggleFolderReviewed: vi.fn(),
+        selectedFileIndex: null,
+      };
+      const scrollIntoViewSpy = vi
+        .spyOn(Element.prototype, 'scrollIntoView')
+        .mockImplementation(() => {});
+      const { rerender } = render(<FileList {...props} />);
+
+      // Collapse the folder containing src/a.ts.
+      fireEvent.click(getTreeRow('src'));
+      expect(screen.queryByTitle('src/a.ts')).not.toBeInTheDocument();
+
+      rerender(<FileList {...props} selectedFileIndex={0} />);
+
+      // The folder re-expands so the selected file's row is visible again.
+      expect(screen.getByTitle('src/a.ts')).toBeInTheDocument();
+      expect(getTreeRow('src/a.ts')).toHaveAttribute('data-active', 'true');
+
+      // The revealed row is scrolled into view within the tree.
+      await waitFor(() => {
+        expect(scrollIntoViewSpy).toHaveBeenCalledWith({ block: 'nearest' });
+      });
+    });
+
+    it('keeps unrelated collapsed folders collapsed when the selection changes', () => {
+      const props = {
+        files: [createFile('src/a.ts'), createFile('src/c.ts'), createFile('other/b.ts')],
+        onScrollToFile: vi.fn(),
+        comments: [],
+        reviewedFiles: new Set<string>(),
+        onToggleReviewed: vi.fn(),
+        onToggleFolderReviewed: vi.fn(),
+        selectedFileIndex: 0,
+      };
+      const { rerender } = render(<FileList {...props} />);
+
+      // Collapse a folder unrelated to the current selection.
+      fireEvent.click(getTreeRow('other'));
+      expect(screen.queryByTitle('other/b.ts')).not.toBeInTheDocument();
+
+      rerender(<FileList {...props} selectedFileIndex={1} />);
+
+      expect(getTreeRow('src/c.ts')).toHaveAttribute('data-active', 'true');
+      expect(screen.queryByTitle('other/b.ts')).not.toBeInTheDocument();
+    });
+
+    it('marks only the selected row as active', () => {
+      render(
+        <FileList
+          files={[createFile('src/a.ts'), createFile('src/b.ts')]}
+          onScrollToFile={vi.fn()}
+          comments={[]}
+          reviewedFiles={new Set()}
+          onToggleReviewed={vi.fn()}
+          onToggleFolderReviewed={vi.fn()}
+          selectedFileIndex={1}
+        />,
+      );
+
+      expect(getTreeRow('src/b.ts')).toHaveAttribute('data-active', 'true');
+      expect(getTreeRow('src/a.ts')).not.toHaveAttribute('data-active');
+    });
+
+    it('collapses everything with a single click after selection-driven auto-expansion', () => {
+      // `src` and `src/a` collapse into one merged node keyed `src/a`, while
+      // auto-expansion unions the synthetic `src` prefix into expandedDirs.
+      const scrollIntoViewSpy = vi
+        .spyOn(Element.prototype, 'scrollIntoView')
+        .mockImplementation(() => {});
+      render(
+        <FileList
+          files={[createFile('src/a/one.ts'), createFile('src/a/two.ts')]}
+          onScrollToFile={vi.fn()}
+          comments={[]}
+          reviewedFiles={new Set()}
+          onToggleReviewed={vi.fn()}
+          onToggleFolderReviewed={vi.fn()}
+          selectedFileIndex={0}
+        />,
+      );
+
+      // Selecting src/a/one.ts auto-expanded its ancestors; every real node
+      // is expanded, so the button must offer a single-click collapse.
+      expect(screen.getByTitle('src/a/one.ts')).toBeInTheDocument();
+      expect(screen.getByTitle('src/a/two.ts')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTitle('Collapse all'));
+
+      expect(screen.queryByTitle('src/a/one.ts')).not.toBeInTheDocument();
+      expect(screen.queryByTitle('src/a/two.ts')).not.toBeInTheDocument();
+      scrollIntoViewSpy.mockRestore();
+    });
   });
 });

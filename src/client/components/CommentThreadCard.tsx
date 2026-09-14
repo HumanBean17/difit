@@ -218,6 +218,8 @@ export function CommentThreadCard({
   const lineLabel = Array.isArray(thread.line)
     ? `${thread.line[0]}-${thread.line[1]}`
     : thread.line;
+  // General (file-independent) threads have no file/line location to show.
+  const locationLabel = thread.file === null ? 'General' : `${thread.file}:${lineLabel}`;
 
   const toggleCollapsed = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -266,7 +268,7 @@ export function CommentThreadCard({
               color: 'var(--color-yellow-path-text)',
             }}
           >
-            {thread.file}:{lineLabel}
+            {locationLabel}
           </span>
           {thread.isOutdated && (
             <span
@@ -326,7 +328,7 @@ export function CommentThreadCard({
             isRootMessage={true}
             showAuthorBadge={showAuthorBadges}
             syntaxTheme={syntaxTheme}
-            filename={thread.file}
+            filename={thread.file ?? undefined}
             originalCode={thread.codeContent}
             onUpdate={(newBody) => onUpdateMessage(thread.id, rootMessage.id, newBody)}
             onResolveOrDelete={() => onRemoveThread(thread.id)}
@@ -340,7 +342,7 @@ export function CommentThreadCard({
                 message={message}
                 showAuthorBadge={showAuthorBadges}
                 syntaxTheme={syntaxTheme}
-                filename={thread.file}
+                filename={thread.file ?? undefined}
                 originalCode={thread.codeContent}
                 onUpdate={(newBody) => onUpdateMessage(thread.id, message.id, newBody)}
                 onResolveOrDelete={() => onRemoveMessage(thread.id, message.id)}
@@ -363,7 +365,7 @@ export function CommentThreadCard({
                 onCancel={() => setIsReplying(false)}
                 selectedCode={thread.codeContent}
                 syntaxTheme={syntaxTheme}
-                filename={thread.file}
+                filename={thread.file ?? undefined}
                 embedded={true}
                 title="Reply to thread"
                 submitLabel="Reply"

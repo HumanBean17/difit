@@ -34,6 +34,7 @@ import {
   type CommentImport,
   type Comment,
   type CommentThread,
+  type DiffCommentPosition,
   type DiffCommentThread,
   type DiffResponse,
   type DiffSelection,
@@ -541,7 +542,7 @@ export async function startServer(
     }
   });
 
-  function normalizeLineValue(line: unknown): DiffCommentThread['position']['line'] {
+  function normalizeLineValue(line: unknown): DiffCommentPosition['line'] {
     if (Array.isArray(line) && line.length === 2) {
       const start = line[0] as unknown;
       const end = line[1] as unknown;
@@ -607,10 +608,12 @@ export async function startServer(
       id: thread.id,
       file: thread.filePath,
       line:
-        typeof thread.position.line === 'number'
-          ? thread.position.line
-          : ([thread.position.line.start, thread.position.line.end] as [number, number]),
-      side: thread.position.side,
+        thread.position === undefined
+          ? null
+          : typeof thread.position.line === 'number'
+            ? thread.position.line
+            : ([thread.position.line.start, thread.position.line.end] as [number, number]),
+      side: thread.position?.side,
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
       codeContent: thread.codeSnapshot?.content,
@@ -619,8 +622,29 @@ export async function startServer(
   }
 
   function normalizeThreadPayload(thread: CommentThread | DiffCommentThread): DiffCommentThread {
-    if ('filePath' in thread && 'position' in thread) {
-      return thread;
+    if ('filePath' in thread) {
+      const diffThread = thread as DiffCommentThread;
+
+      // General thread: absent/null filePath with absent position. Note that a
+      // general thread from the client HAS a filePath key (as null) but NO
+      // position key, so the legacy branch below would misroute it.
+      if (diffThread.filePath == null && diffThread.position === undefined) {
+        return {
+          ...diffThread,
+          filePath: null,
+          codeSnapshot: undefined,
+        };
+      }
+
+      // Malformed file thread: a position but no file — coerce like legacy.
+      if (diffThread.filePath == null) {
+        return {
+          ...diffThread,
+          filePath: '<unknown file>',
+        };
+      }
+
+      return diffThread;
     }
 
     const threadId =
@@ -650,6 +674,18 @@ export async function startServer(
           ];
     const firstMessage = messages[0];
     const lastMessage = messages[messages.length - 1];
+
+    // Legacy payload with a null/absent file is a general thread.
+    if (thread.file == null) {
+      return {
+        id: threadId,
+        filePath: null,
+        createdAt: thread.createdAt || firstMessage?.createdAt || now,
+        updatedAt: thread.updatedAt || lastMessage?.updatedAt || thread.createdAt || now,
+        codeSnapshot: undefined,
+        messages,
+      };
+    }
 
     return {
       id: threadId,

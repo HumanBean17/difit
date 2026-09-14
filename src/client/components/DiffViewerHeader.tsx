@@ -1,6 +1,7 @@
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Copy,
   FileDiff,
@@ -13,6 +14,14 @@ import { useState } from 'react';
 
 import type { DiffFile } from '../../types/diff';
 import { copyTextToClipboard } from '../utils/clipboard';
+import { splitFilePath } from '../utils/filePath';
+
+export interface FocusNav {
+  position: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+}
 
 interface DiffViewerHeaderProps {
   file: DiffFile;
@@ -20,6 +29,7 @@ interface DiffViewerHeaderProps {
   isFocused?: boolean;
   isReviewed: boolean;
   isChangedSinceViewed?: boolean;
+  focusNav?: FocusNav;
   onToggleCollapsed: (path: string) => void;
   onToggleAllCollapsed: (shouldCollapse: boolean) => void;
   onToggleReviewed: (path: string) => void;
@@ -44,11 +54,13 @@ export const DiffViewerHeader = ({
   isFocused = false,
   isReviewed,
   isChangedSinceViewed = false,
+  focusNav,
   onToggleCollapsed,
   onToggleAllCollapsed,
   onToggleReviewed,
 }: DiffViewerHeaderProps) => {
   const [isCopied, setIsCopied] = useState(false);
+  const { directory, basename } = splitFilePath(file.path);
 
   return (
     <div
@@ -76,8 +88,24 @@ export const DiffViewerHeader = ({
           {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
         </button>
         {getFileIcon(file.status)}
-        <h2 className="text-sm font-mono text-github-text-primary m-0 overflow-hidden text-ellipsis whitespace-nowrap">
-          {file.path}
+        <h2
+          className="text-sm font-mono text-github-text-primary m-0 min-w-0 overflow-hidden flex items-baseline"
+          title={file.path}
+        >
+          {directory !== '' && (
+            <>
+              <span
+                className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+                style={{ direction: 'rtl' }}
+              >
+                {directory}
+              </span>
+              <span className="text-github-text-muted shrink-0">/</span>
+            </>
+          )}
+          <span className="text-github-text-primary font-medium shrink-0 whitespace-nowrap">
+            {basename}
+          </span>
         </h2>
         <button
           className={`bg-transparent border-none cursor-pointer px-1.5 py-1 rounded text-sm transition-all hover:bg-github-bg-tertiary ${
@@ -108,6 +136,33 @@ export const DiffViewerHeader = ({
       </div>
 
       <div className="flex items-center gap-3">
+        {focusNav && (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={focusNav.onPrev}
+              disabled={focusNav.position <= 1}
+              className="p-1 rounded text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Previous file"
+              aria-label="Previous file"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <span className="text-xs text-github-text-secondary tabular-nums whitespace-nowrap">
+              {focusNav.position} / {focusNav.total}
+            </span>
+            <button
+              type="button"
+              onClick={focusNav.onNext}
+              disabled={focusNav.position >= focusNav.total}
+              className="p-1 rounded text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Next file"
+              aria-label="Next file"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        )}
         {isChangedSinceViewed && !isReviewed && (
           <span
             className="inline-flex h-6 items-center rounded-full border border-github-warning px-2.5 text-xs font-medium text-github-warning"
