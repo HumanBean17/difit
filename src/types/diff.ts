@@ -61,6 +61,8 @@ export interface DiffResponse {
   repositoryId?: string;
   commentImports?: CommentImport[];
   commentImportId?: string;
+  // The server's thread store is authoritative (ladder sessions); local storage is only a cache.
+  serverOwnedComments?: boolean;
 }
 
 export interface GeneratedStatusResponse {
@@ -109,6 +111,8 @@ export interface DiffCommentMessage {
   updatedAt: string;
 }
 
+export type DiffCommentThreadStatus = 'open' | 'resolved';
+
 // New data structures for enhanced comment and viewed state management
 export interface DiffCommentThread {
   id: string;
@@ -123,6 +127,10 @@ export interface DiffCommentThread {
   codeSnapshot?: DiffCommentCodeSnapshot;
 
   messages: DiffCommentMessage[];
+
+  // Absent means open. Resolved threads are kept as history, collapsed in the UI.
+  status?: DiffCommentThreadStatus;
+  resolvedAt?: string;
 }
 
 interface CommentImportBase {
@@ -142,6 +150,8 @@ export interface ThreadCommentImport extends CommentImportBase {
 
 export interface ReplyCommentImport extends CommentImportBase {
   type: 'reply';
+  // Targets the thread directly; filePath/position are then not used for matching.
+  threadId?: string;
 }
 
 export type CommentImport = ThreadCommentImport | ReplyCommentImport;
@@ -198,6 +208,7 @@ export interface CommentThread {
   updatedAt: string;
   codeContent?: string;
   isOutdated?: boolean;
+  status?: DiffCommentThreadStatus;
   messages: DiffCommentMessage[];
 }
 

@@ -1,8 +1,10 @@
 import {
   Columns,
   AlignLeft,
+  Flag,
   Focus,
   MessageSquarePlus,
+  Send,
   Settings,
   PanelLeftClose,
   PanelLeft,
@@ -21,6 +23,7 @@ import {
   type CommentThread,
   type RevisionsResponse,
 } from '../types/diff';
+import type { LadderInfo, LadderView } from '../types/ladder';
 import { DEFAULT_DIFF_VIEW_MODE, normalizeDiffViewMode } from '../utils/diffMode';
 import { mergeCommentThreads } from '../utils/commentImports';
 import {
@@ -39,11 +42,14 @@ import { FileList } from './components/FileList';
 import { GeneralCommentsCard } from './components/GeneralCommentsCard';
 import { GitHubIcon } from './components/GitHubIcon';
 import { HelpModal } from './components/HelpModal';
+import { FinishReviewDialog, UnplacedThreadsDialog } from './components/LadderDialogs';
 import { Logo } from './components/Logo';
 import { ReloadButton } from './components/ReloadButton';
 import { RevisionDetailModal } from './components/RevisionDetailModal';
+import { RungBar } from './components/RungBar';
 import { SettingsModal } from './components/SettingsModal';
 import { SparkleAnimation } from './components/SparkleAnimation';
+import { ReviewActionsProvider } from './contexts/ReviewActionsContext';
 import { WordHighlightProvider } from './contexts/WordHighlightContext';
 import type { CursorPosition } from './hooks/keyboardNavigation';
 import { useAppearanceSettings } from './hooks/useAppearanceSettings';
@@ -52,6 +58,7 @@ import { useExpandedLines, type MergedChunk } from './hooks/useExpandedLines';
 import { useFileWatch } from './hooks/useFileWatch';
 import { useKeyboardNavigation } from './hooks/useKeyboardNavigation';
 import { useLazyDiffRendering } from './hooks/useLazyDiffRendering';
+import { useReviewSession } from './hooks/useReviewSession';
 import { useViewedFiles } from './hooks/useViewedFiles';
 import { useViewport } from './hooks/useViewport';
 import { fetchClientSettings, saveClientSettings } from './services/userSettings';
@@ -159,6 +166,23 @@ const getStoredFocusMode = (): boolean | null => {
 
 const getInitialFocusMode = () => getStoredFocusMode() ?? false;
 
+function clampLadderView(view: LadderView, ladder: LadderInfo): LadderView {
+  if (view.kind === 'all' || ladder.rungs.length === 0) return { kind: 'all' };
+  return { kind: 'rung', index: Math.min(Math.max(view.index, 1), ladder.rungs.length) };
+}
+
+function ladderSelection(view: LadderView, ladder: LadderInfo): DiffSelection {
+  const rung = view.kind === 'rung' ? ladder.rungs[view.index - 1] : undefined;
+  return rung
+    ? createDiffSelection(rung.parentSha, rung.sha)
+    : createDiffSelection(ladder.baseSha, ladder.tipSha);
+}
+
+// A typed-but-unsaved comment (any non-empty comment form) blocks auto-reload.
+function hasDraftComment(): boolean {
+  return document.querySelector('form[data-empty="false"]') !== null;
+}
+
 function App() {
   const [diffData, setDiffData] = useState<DiffResponse | null>(null);
   const [diffDataVersion, setDiffDataVersion] = useState(0);
@@ -229,6 +253,8 @@ function App() {
     addGeneralThread,
     replyToThread,
     removeThread,
+    resolveThread,
+    reopenThread,
     removeMessage,
     updateMessage,
     clearAllComments,
@@ -243,7 +269,33 @@ function App() {
     resolvedSelection?.baseMode,
   );
 
-  const showMobileCommentsBar = isMobile && threads.length > 0;
+  // Review-ladder session (difit --ladder): rungs, approvals, pending submit count.
+  const { session, refreshSession } = useReviewSession();
+  const ladderInfo = session?.ladder ?? null;
+  const ladderInfoRef = useRef<LadderInfo | null>(ladderInfo);
+  ladderInfoRef.current = ladderInfo;
+  const isLadder = ladderInfo !== null;
+  const isLadderRef = useRef(isLadder);
+  isLadderRef.current = isLadder;
+  const [ladderView, setLadderView] = useState<LadderView>({ kind: 'rung', index: 1 });
+  const ladderViewRef = useRef(ladderView);
+  ladderViewRef.current = ladderView;
+  const [ladderBanner, setLadderBanner] = useState<string | null>(null);
+  // The ladder the shown diff came from. While a rewrite waits behind a draft, the
+  // rung bar keeps this shape instead of the server's newer one.
+  const [appliedLadder, setAppliedLadder] = useState<LadderInfo | null>(null);
+  const displayedLadder =
+    ladderInfo && appliedLadder && ladderInfo.tipSha !== appliedLadder.tipSha
+      ? appliedLadder
+      : ladderInfo;
+  const [isUnplacedOpen, setIsUnplacedOpen] = useState(false);
+  const [isFinishOpen, setIsFinishOpen] = useState(false);
+  const openThreads = useMemo(
+    () => threads.filter((thread) => thread.status !== 'resolved'),
+    [threads],
+  );
+
+  const showMobileCommentsBar = isMobile && openThreads.length > 0;
   const commentsContextKey = useMemo(() => {
     if (!resolvedSelectionKey) {
       return null;
@@ -655,9 +707,14 @@ function App() {
           thread.filePath === null
             ? false
             : isThreadOutdated(thread, fileLineIndexByPath.get(thread.filePath)),
+        status: thread.status,
         messages: thread.messages,
       })),
     [threads, fileLineIndexByPath],
+  );
+  const openNormalizedThreads = useMemo(
+    () => normalizedThreads.filter((thread) => thread.status !== 'resolved'),
+    [normalizedThreads],
   );
   const showAuthorBadges = useMemo(
     () => hasMultipleCommentAuthors(normalizedThreads.flatMap((thread) => thread.messages)),
@@ -690,10 +747,62 @@ function App() {
     lineIndex: number;
   } | null>(null);
   const fetchDiffDataRef = useRef<((selection?: DiffSelection) => Promise<void>) | null>(null);
-  const handleWatchReload = useCallback(async () => {
-    await fetchDiffDataRef.current?.();
+
+  // Shows a rung (or All) without the full-page loading state.
+  const goToLadderView = useCallback(async (view: LadderView, ladder?: LadderInfo | null) => {
+    const info = ladder ?? ladderInfoRef.current;
+    if (!info) return;
+    const next = clampLadderView(view, info);
+    const selection = ladderSelection(next, info);
+    setLadderView(next);
+    setAppliedLadder(info);
+    ladderViewRef.current = next;
+    hasUserSelectedRevisionRef.current = true;
+    selectedRevisionRef.current = selection;
+    setSelectedRevision(selection);
+    await fetchDiffDataRef.current?.(selection);
   }, []);
+
+  const stepLadderView = useCallback(
+    (delta: number) => {
+      const info = ladderInfoRef.current;
+      if (!info || info.rungs.length === 0) return;
+      const current = ladderViewRef.current;
+      const index = current.kind === 'rung' ? current.index + delta : delta > 0 ? 1 : 0;
+      if (index < 1 || index > info.rungs.length) return;
+      void goToLadderView({ kind: 'rung', index }).then(() => {
+        diffScrollContainerRef.current?.scrollTo({ top: 0 });
+      });
+    },
+    [goToLadderView],
+  );
+
+  const handleWatchReload = useCallback(async () => {
+    if (isLadderRef.current) {
+      // The branch moved: re-read the ladder and stay on the same rung, now at its new sha.
+      const info = (await refreshSession())?.ladder;
+      if (info) {
+        const view = clampLadderView(ladderViewRef.current, info);
+        const previousCount = ladderInfoRef.current?.rungs.length;
+        const change =
+          view.kind === 'rung'
+            ? info.lastRewrite?.changed.find((entry) => entry.index === view.index)
+            : undefined;
+        if (change) {
+          setLadderBanner(
+            `Rung ${change.index} updated by a fix: ${change.from.slice(0, 7)} → ${change.to.slice(0, 7)}`,
+          );
+        } else if (previousCount !== undefined && previousCount !== info.rungs.length) {
+          setLadderBanner(`Ladder rewritten: now ${info.rungs.length} rungs`);
+        }
+        await goToLadderView(view, info);
+        return;
+      }
+    }
+    await fetchDiffDataRef.current?.();
+  }, [goToLadderView, refreshSession]);
   const handleCommentsChanged = useCallback(async () => {
+    void refreshSession();
     try {
       const serverThreads = await fetchServerThreads();
       skipNextCommentSyncRef.current = true;
@@ -704,12 +813,16 @@ function App() {
     } catch (commentsError) {
       console.error('Failed to refresh comments from server:', commentsError);
     }
-  }, [commentsContextKey, fetchServerThreads, replaceThreads]);
+  }, [commentsContextKey, fetchServerThreads, refreshSession, replaceThreads]);
 
   // File watch for reload functionality - initialize with callback
   const { shouldReload, reload, watchState } = useFileWatch(
     handleWatchReload,
     handleCommentsChanged,
+    {
+      shouldAutoReload: () => isLadderRef.current && !hasDraftComment(),
+      onReviewChanged: () => void refreshSession(),
+    },
   );
 
   // Track which file the mouse is over so `v` works without a cursor
@@ -1279,7 +1392,8 @@ function App() {
       return;
     }
 
-    const shouldReplaceFromServer = pendingBootstrapAfterLocalResetRef.current;
+    const shouldReplaceFromServer =
+      pendingBootstrapAfterLocalResetRef.current || diffData?.serverOwnedComments === true;
     pendingBootstrapAfterLocalResetRef.current = false;
 
     bootstrappingCommentsKeyRef.current = commentsContextKey;
@@ -1329,6 +1443,7 @@ function App() {
   }, [
     bootstrappedCommentsKey,
     commentsContextKey,
+    diffData?.serverOwnedComments,
     fetchServerThreads,
     hasLoadedComments,
     replaceThreads,
@@ -1452,6 +1567,120 @@ function App() {
       return Promise.resolve();
     },
     [addGeneralThread],
+  );
+
+  // Ladder sessions open on the first rung not yet approved.
+  const initialLadderViewAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!ladderInfo || initialLadderViewAppliedRef.current) return;
+    initialLadderViewAppliedRef.current = true;
+    const firstOpen = ladderInfo.rungs.find((rung) => rung.approval !== 'approved');
+    void goToLadderView(
+      ladderInfo.rungs.length === 0
+        ? { kind: 'all' }
+        : { kind: 'rung', index: firstOpen?.index ?? 1 },
+      ladderInfo,
+    );
+  }, [goToLadderView, ladderInfo]);
+
+  const threadsRef = useRef(threads);
+  threadsRef.current = threads;
+  const hasBootstrappedCommentsRef = useRef(hasBootstrappedComments);
+  hasBootstrappedCommentsRef.current = hasBootstrappedComments;
+
+  // Hands every pending comment to the agent waiting in `difit comment wait`.
+  const submitReview = useCallback(async () => {
+    try {
+      await fetch(getCommentApiUrl('/api/review/submit'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // Send this view's threads along so a just-saved comment is included; an
+        // unbootstrapped copy could be stale, so it is left out.
+        body: JSON.stringify(
+          hasBootstrappedCommentsRef.current
+            ? {
+                threads: threadsRef.current,
+                baseVersion: serverCommentVersionRef.current ?? undefined,
+              }
+            : {},
+        ),
+      });
+    } catch (submitError) {
+      console.error('Failed to submit review:', submitError);
+    }
+    await refreshSession();
+  }, [getCommentApiUrl, refreshSession]);
+
+  // Runs after the save that triggered it has re-rendered the thread list.
+  const requestSubmit = useCallback(() => {
+    setTimeout(() => void submitReview(), 0);
+  }, [submitReview]);
+
+  const toggleRungApproval = useCallback(
+    async (index: number) => {
+      const rung = ladderInfoRef.current?.rungs[index - 1];
+      if (!rung) return;
+      await fetch('/api/ladder/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ index, approved: rung.approval !== 'approved' }),
+      });
+      await refreshSession();
+    },
+    [refreshSession],
+  );
+
+  const finishReview = useCallback(async () => {
+    await fetch('/api/review/finish', { method: 'POST' });
+    setIsFinishOpen(false);
+    await refreshSession();
+  }, [refreshSession]);
+
+  const attachUnplacedThread = useCallback(
+    async (threadId: string, index: number) => {
+      await fetch(`/api/ladder/threads/${encodeURIComponent(threadId)}/attach`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ index }),
+      });
+      await refreshSession();
+    },
+    [refreshSession],
+  );
+
+  const deleteUnplacedThread = useCallback(
+    async (threadId: string) => {
+      await fetch(`/api/comments/${encodeURIComponent(threadId)}`, { method: 'DELETE' });
+      await refreshSession();
+    },
+    [refreshSession],
+  );
+
+  // `<` / `>` by key code: react-hotkeys-hook reads a literal '>' as its sequence separator.
+  const ladderHotkeyOptions = {
+    scopes: 'navigation',
+    enableOnFormTags: false,
+    preventDefault: true,
+    enabled: isLadder,
+  };
+  useHotkeys('shift+comma', () => stepLadderView(-1), ladderHotkeyOptions, [stepLadderView]);
+  useHotkeys('shift+period', () => stepLadderView(1), ladderHotkeyOptions, [stepLadderView]);
+  useHotkeys(
+    'a',
+    () => {
+      if (ladderView.kind === 'rung') void toggleRungApproval(ladderView.index);
+    },
+    ladderHotkeyOptions,
+    [ladderView, toggleRungApproval],
+  );
+
+  const reviewActions = useMemo(
+    () => ({
+      requestSubmit: session ? requestSubmit : undefined,
+      reopenThread,
+      deleteThread: removeThread,
+    }),
+    [removeThread, reopenThread, requestSubmit, session],
   );
 
   const handleCopyAllComments = async () => {
@@ -1587,484 +1816,561 @@ function App() {
     settings.editor.command.trim() !== '' &&
     settings.editor.argsTemplate.trim() !== '';
 
+  const pendingCount = session?.pendingCount ?? 0;
+  const currentRung =
+    displayedLadder && ladderView.kind === 'rung'
+      ? displayedLadder.rungs[ladderView.index - 1]
+      : undefined;
+
   return (
-    <WordHighlightProvider>
-      <div className="h-screen flex flex-col" onClickCapture={handleGlobalClick}>
-        <header
-          className={`bg-github-bg-secondary border-b border-github-border flex ${
-            isMobile ? 'flex-col' : 'flex-row items-center'
-          }`}
-        >
-          <div
-            className={`flex items-center justify-between w-full ${
-              isMobile ? 'px-3 py-2 gap-3' : 'px-4 py-3 gap-4 w-auto'
-            } ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
-            style={{
-              width: isMobile ? '100%' : isFileTreeOpen ? `${sidebarWidth}px` : 'auto',
-              minWidth: isMobile ? '0px' : isFileTreeOpen ? '200px' : 'auto',
-              maxWidth: isMobile ? 'none' : isFileTreeOpen ? '600px' : 'none',
-            }}
-          >
-            <h1>
-              <Logo
-                style={{
-                  height: '18px',
-                  color: 'var(--color-github-text-secondary)',
-                }}
-              />
-            </h1>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setIsFileTreeOpen(!isFileTreeOpen)}
-                className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
-                title={isFileTreeOpen ? 'Collapse file tree' : 'Expand file tree'}
-                aria-expanded={isFileTreeOpen}
-                aria-controls="file-tree-panel"
-                aria-label="Toggle file tree panel"
-              >
-                {isFileTreeOpen ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
-              </button>
-              <button
-                type="button"
-                onClick={handleOpenGeneralCommentForm}
-                className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
-                title="Add general comment"
-                aria-label="Add general comment"
-              >
-                <MessageSquarePlus size={18} />
-              </button>
-              <button
-                onClick={() => setIsSettingsOpen(true)}
-                className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
-                title="Settings"
-              >
-                <Settings size={18} />
-              </button>
-            </div>
-          </div>
-          {!isMobile && (
-            <div
-              className={`border-r border-github-border ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
-              style={{
-                width: isFileTreeOpen ? '4px' : '0px',
-                height: 'calc(100% - 16px)',
-                margin: '8px 0',
-                transform: 'translateX(-2px)',
-              }}
-            />
-          )}
-          <div
-            className={`flex-1 flex flex-wrap items-center justify-between ${
-              isMobile ? 'px-3 pb-2 gap-3' : 'px-4 py-3 gap-4'
+    <ReviewActionsProvider value={reviewActions}>
+      <WordHighlightProvider>
+        <div className="h-screen flex flex-col" onClickCapture={handleGlobalClick}>
+          <header
+            className={`bg-github-bg-secondary border-b border-github-border flex ${
+              isMobile ? 'flex-col' : 'flex-row items-center'
             }`}
           >
-            <div className={`flex flex-wrap items-center ${isMobile ? 'gap-2' : 'gap-3'}`}>
-              {!isMobile && (
-                <div className="flex bg-github-bg-tertiary border border-github-border rounded-md p-1">
-                  <button
-                    onClick={() => handleDiffModeChange('split')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
-                      diffMode === 'split'
-                        ? 'bg-github-bg-primary text-github-text-primary shadow-sm'
-                        : 'text-github-text-secondary hover:text-github-text-primary'
-                    }`}
-                  >
-                    <Columns size={14} />
-                    Split
-                  </button>
-                  <button
-                    onClick={() => handleDiffModeChange('unified')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
-                      diffMode === 'unified'
-                        ? 'bg-github-bg-primary text-github-text-primary shadow-sm'
-                        : 'text-github-text-secondary hover:text-github-text-primary'
-                    }`}
-                  >
-                    <AlignLeft size={14} />
-                    Unified
-                  </button>
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  if (!isFocusMode) {
-                    // Entering: render the focused file synchronously so the
-                    // deferred-render placeholder never flashes for a frame
-                    // before the focus-mode entry effect runs.
-                    const pathToFocus = diffData.files[activeFileIndex ?? 0]?.path;
-                    if (pathToFocus) {
-                      ensureFileRendered(pathToFocus);
-                    }
-                    setIsFocusMode(true);
-                    return;
-                  }
-                  // Exiting via the button mirrors the Esc path: re-anchor the
-                  // list view on the file that was focused.
-                  const focusedPath = diffData.files[activeFileIndex ?? 0]?.path;
-                  setIsFocusMode(false);
-                  if (focusedPath) {
-                    scrollFileIntoDiffContainer(focusedPath);
-                  }
-                }}
-                disabled={diffData.files.length === 0}
-                className={`p-2 rounded transition-colors ${
-                  isFocusMode
-                    ? 'bg-github-bg-tertiary text-github-text-primary'
-                    : 'text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary'
-                } ${diffData.files.length === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-                title="Focus mode — show only the active file (Esc to exit)"
-                aria-pressed={isFocusMode}
-                aria-label="Toggle focus mode"
-              >
-                <Focus size={16} />
-              </button>
-              <Checkbox
-                checked={ignoreWhitespace}
-                onChange={setIgnoreWhitespace}
-                label="Ignore Whitespace"
-                title={ignoreWhitespace ? 'Show whitespace changes' : 'Ignore whitespace changes'}
-              />
-              {/* File Watch Reload Button */}
-              <ReloadButton
-                shouldReload={shouldReload}
-                isReloading={watchState.isReloading}
-                onReload={reload}
-                changeType={watchState.lastChangeType}
-                compact={isMobile}
-              />
-            </div>
             <div
-              className={`flex flex-wrap items-center text-sm text-github-text-secondary ${
-                isMobile ? 'gap-3' : 'gap-4'
-              }`}
+              className={`flex items-center justify-between w-full ${
+                isMobile ? 'px-3 py-2 gap-3' : 'px-4 py-3 gap-4 w-auto'
+              } ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
+              style={{
+                width: isMobile ? '100%' : isFileTreeOpen ? `${sidebarWidth}px` : 'auto',
+                minWidth: isMobile ? '0px' : isFileTreeOpen ? '200px' : 'auto',
+                maxWidth: isMobile ? 'none' : isFileTreeOpen ? '600px' : 'none',
+              }}
             >
-              {!isMobile && threads.length > 0 && (
-                <CommentsDropdown
-                  commentsCount={threads.length}
-                  isCopiedAll={isCopiedAll}
-                  onCopyAll={handleCopyAllComments}
-                  onDeleteAll={clearAllComments}
-                  onViewAll={() => setIsCommentsListOpen(true)}
-                />
-              )}
-              <div className="flex flex-col gap-1 items-center">
-                <div className="text-xs relative">
-                  {viewedFiles.size === diffData.files.length
-                    ? 'All diffs difit-ed!'
-                    : `${viewedFiles.size} / ${diffData.files.length} files viewed`}
-                  <SparkleAnimation isActive={showSparkles} />
-                </div>
-                <div
-                  className="relative h-2 bg-github-bg-tertiary rounded-full overflow-hidden"
+              <h1>
+                <Logo
                   style={{
-                    width: '90px',
-                    border: '1px solid var(--color-github-border)',
+                    height: '18px',
+                    color: 'var(--color-github-text-secondary)',
                   }}
+                />
+              </h1>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setIsFileTreeOpen(!isFileTreeOpen)}
+                  className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
+                  title={isFileTreeOpen ? 'Collapse file tree' : 'Expand file tree'}
+                  aria-expanded={isFileTreeOpen}
+                  aria-controls="file-tree-panel"
+                  aria-label="Toggle file tree panel"
                 >
-                  <div
-                    className="absolute top-0 right-0 h-full transition-all duration-300 ease-out"
-                    style={{
-                      width: `${((diffData.files.length - viewedFiles.size) / diffData.files.length) * 100}%`,
-                      backgroundColor: (() => {
-                        const remainingPercent =
-                          ((diffData.files.length - viewedFiles.size) / diffData.files.length) *
-                          100;
-                        if (remainingPercent > 50) return 'var(--color-github-accent)'; // green
-                        if (remainingPercent > 20) return 'var(--color-github-warning)'; // yellow
-                        return 'var(--color-github-danger)'; // red
-                      })(),
-                    }}
-                  />
-                </div>
+                  {isFileTreeOpen ? <PanelLeftClose size={18} /> : <PanelLeft size={18} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleOpenGeneralCommentForm}
+                  className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
+                  title="Add general comment"
+                  aria-label="Add general comment"
+                >
+                  <MessageSquarePlus size={18} />
+                </button>
+                <button
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="p-2 text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary rounded transition-colors"
+                  title="Settings"
+                >
+                  <Settings size={18} />
+                </button>
               </div>
-              {revisionOptions ? (
-                <DiffQuickMenu
-                  options={revisionOptions}
-                  selection={selectedRevision}
-                  resolvedBaseRevision={resolvedBaseRevision}
-                  resolvedTargetRevision={resolvedTargetRevision}
-                  onSelectDiff={(selection) => void handleRevisionChange(selection)}
-                  onOpenAdvanced={() => setIsRevisionModalOpen(true)}
-                  compact={!isDesktop}
-                />
-              ) : (
-                <span className="text-xs">
-                  Reviewing:{' '}
-                  <code className="bg-github-bg-tertiary px-1.5 py-0.5 rounded text-xs text-github-text-primary">
-                    {diffData.commit.includes('...') ? (
-                      <>
-                        <span className="text-github-text-secondary font-medium">
-                          {diffData.commit.split('...')[0]}...
-                        </span>
-                        <span className="font-medium">{diffData.commit.split('...')[1]}</span>
-                      </>
-                    ) : (
-                      diffData.commit
-                    )}
-                  </code>
-                </span>
-              )}
             </div>
-          </div>
-        </header>
-        {revisionOptions && (
-          <RevisionDetailModal
-            key={isRevisionModalOpen ? getDiffSelectionKey(selectedRevision) : 'closed'}
-            isOpen={isRevisionModalOpen}
-            onClose={() => setIsRevisionModalOpen(false)}
-            options={revisionOptions}
-            selection={selectedRevision}
-            resolvedBaseRevision={resolvedBaseRevision}
-            resolvedTargetRevision={resolvedTargetRevision}
-            onApply={(selection) => void handleRevisionChange(selection)}
-          />
-        )}
-
-        {isMobile && isFileTreeOpen && (
-          <button
-            type="button"
-            aria-label="Close file tree"
-            className="fixed inset-0 bg-black/40 z-30"
-            onClick={() => setIsFileTreeOpen(false)}
-          />
-        )}
-
-        <div className="flex flex-1 overflow-hidden relative">
-          <div
-            className={`relative overflow-hidden ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
-            style={{
-              width: isMobile ? '0px' : isFileTreeOpen ? `${sidebarWidth}px` : '0px',
-            }}
-          >
-            <aside
-              id="file-tree-panel"
-              className={`bg-github-bg-secondary overflow-y-auto flex flex-col ${
-                isMobile
-                  ? 'fixed inset-y-0 right-0 z-40 w-[min(85vw,360px)] border-l border-github-border transition-transform duration-300 ease-out'
-                  : 'relative border-r border-github-border'
+            {!isMobile && (
+              <div
+                className={`border-r border-github-border ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
+                style={{
+                  width: isFileTreeOpen ? '4px' : '0px',
+                  height: 'calc(100% - 16px)',
+                  margin: '8px 0',
+                  transform: 'translateX(-2px)',
+                }}
+              />
+            )}
+            <div
+              className={`flex-1 flex flex-wrap items-center justify-between ${
+                isMobile ? 'px-3 pb-2 gap-3' : 'px-4 py-3 gap-4'
               }`}
-              style={{
-                width: isMobile ? 'min(85vw, 360px)' : `${sidebarWidth}px`,
-                minWidth: isMobile ? '0px' : '200px',
-                maxWidth: isMobile ? 'none' : '600px',
-                height: '100%',
-                transform: isMobile
-                  ? isFileTreeOpen
-                    ? 'translateX(0)'
-                    : 'translateX(100%)'
-                  : undefined,
-              }}
             >
-              <div className="flex-1 overflow-y-auto">
-                <FileList
-                  files={diffData.files}
-                  onScrollToFile={handleScrollToFile}
-                  onFileSelected={isMobile ? handleMobileFileSelected : undefined}
-                  comments={normalizedThreads}
-                  reviewedFiles={viewedFiles}
-                  onToggleReviewed={toggleFileReviewed}
-                  onToggleFolderReviewed={toggleFolderReviewed}
-                  selectedFileIndex={activeFileIndex}
+              <div className={`flex flex-wrap items-center ${isMobile ? 'gap-2' : 'gap-3'}`}>
+                {!isMobile && (
+                  <div className="flex bg-github-bg-tertiary border border-github-border rounded-md p-1">
+                    <button
+                      onClick={() => handleDiffModeChange('split')}
+                      className={`px-3 py-1.5 text-xs font-medium rounded transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
+                        diffMode === 'split'
+                          ? 'bg-github-bg-primary text-github-text-primary shadow-sm'
+                          : 'text-github-text-secondary hover:text-github-text-primary'
+                      }`}
+                    >
+                      <Columns size={14} />
+                      Split
+                    </button>
+                    <button
+                      onClick={() => handleDiffModeChange('unified')}
+                      className={`px-3 py-1.5 text-xs font-medium rounded transition-all duration-200 flex items-center gap-1.5 cursor-pointer ${
+                        diffMode === 'unified'
+                          ? 'bg-github-bg-primary text-github-text-primary shadow-sm'
+                          : 'text-github-text-secondary hover:text-github-text-primary'
+                      }`}
+                    >
+                      <AlignLeft size={14} />
+                      Unified
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!isFocusMode) {
+                      // Entering: render the focused file synchronously so the
+                      // deferred-render placeholder never flashes for a frame
+                      // before the focus-mode entry effect runs.
+                      const pathToFocus = diffData.files[activeFileIndex ?? 0]?.path;
+                      if (pathToFocus) {
+                        ensureFileRendered(pathToFocus);
+                      }
+                      setIsFocusMode(true);
+                      return;
+                    }
+                    // Exiting via the button mirrors the Esc path: re-anchor the
+                    // list view on the file that was focused.
+                    const focusedPath = diffData.files[activeFileIndex ?? 0]?.path;
+                    setIsFocusMode(false);
+                    if (focusedPath) {
+                      scrollFileIntoDiffContainer(focusedPath);
+                    }
+                  }}
+                  disabled={diffData.files.length === 0}
+                  className={`p-2 rounded transition-colors ${
+                    isFocusMode
+                      ? 'bg-github-bg-tertiary text-github-text-primary'
+                      : 'text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary'
+                  } ${diffData.files.length === 0 ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                  title="Focus mode — show only the active file (Esc to exit)"
+                  aria-pressed={isFocusMode}
+                  aria-label="Toggle focus mode"
+                >
+                  <Focus size={16} />
+                </button>
+                <Checkbox
+                  checked={ignoreWhitespace}
+                  onChange={setIgnoreWhitespace}
+                  label="Ignore Whitespace"
+                  title={ignoreWhitespace ? 'Show whitespace changes' : 'Ignore whitespace changes'}
+                />
+                {/* File Watch Reload Button */}
+                <ReloadButton
+                  shouldReload={shouldReload}
+                  isReloading={watchState.isReloading}
+                  onReload={reload}
+                  changeType={watchState.lastChangeType}
+                  compact={isMobile}
                 />
               </div>
-              {!isMobile && (
-                <div className="p-4 border-t border-github-border flex justify-between items-center">
+              <div
+                className={`flex flex-wrap items-center text-sm text-github-text-secondary ${
+                  isMobile ? 'gap-3' : 'gap-4'
+                }`}
+              >
+                {(isLadder || pendingCount > 0) && (
                   <button
-                    onClick={() => setIsHelpOpen(true)}
-                    className="flex items-center gap-1.5 text-github-text-secondary hover:text-github-text-primary transition-colors"
-                    title="Keyboard shortcuts (Shift+?)"
+                    type="button"
+                    onClick={() => void submitReview()}
+                    disabled={pendingCount === 0}
+                    className="flex items-center gap-1.5 rounded px-3 py-1.5 text-xs font-medium text-white transition-opacity disabled:opacity-40"
+                    style={{ backgroundColor: 'var(--color-github-accent)' }}
+                    title="Send pending comments to the agent (Cmd/Ctrl+Enter in a comment does save + submit)"
                   >
-                    <Keyboard size={16} />
-                    <span className="text-sm">Shortcuts</span>
+                    <Send size={12} />
+                    Submit ({pendingCount})
                   </button>
-                  <a
-                    href="https://github.com/yoshiko-pg/difit"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-github-text-secondary hover:text-github-text-primary transition-colors"
-                    title="View on GitHub"
+                )}
+                {isLadder && (
+                  <button
+                    type="button"
+                    onClick={() => setIsFinishOpen(true)}
+                    disabled={session?.finished}
+                    className="flex items-center gap-1.5 rounded border border-github-border px-3 py-1.5 text-xs text-github-text-primary hover:bg-github-bg-tertiary disabled:opacity-40"
+                    title="Finish the review"
                   >
-                    <span className="text-sm">Star on GitHub</span>
-                    <GitHubIcon style={{ height: '18px', width: '18px' }} />
-                  </a>
+                    <Flag size={12} />
+                    Finish
+                  </button>
+                )}
+                {!isMobile && openThreads.length > 0 && (
+                  <CommentsDropdown
+                    commentsCount={openThreads.length}
+                    isCopiedAll={isCopiedAll}
+                    onCopyAll={handleCopyAllComments}
+                    onDeleteAll={clearAllComments}
+                    onViewAll={() => setIsCommentsListOpen(true)}
+                  />
+                )}
+                <div className="flex flex-col gap-1 items-center">
+                  <div className="text-xs relative">
+                    {viewedFiles.size === diffData.files.length
+                      ? 'All diffs difit-ed!'
+                      : `${viewedFiles.size} / ${diffData.files.length} files viewed`}
+                    <SparkleAnimation isActive={showSparkles} />
+                  </div>
+                  <div
+                    className="relative h-2 bg-github-bg-tertiary rounded-full overflow-hidden"
+                    style={{
+                      width: '90px',
+                      border: '1px solid var(--color-github-border)',
+                    }}
+                  >
+                    <div
+                      className="absolute top-0 right-0 h-full transition-all duration-300 ease-out"
+                      style={{
+                        width: `${((diffData.files.length - viewedFiles.size) / diffData.files.length) * 100}%`,
+                        backgroundColor: (() => {
+                          const remainingPercent =
+                            ((diffData.files.length - viewedFiles.size) / diffData.files.length) *
+                            100;
+                          if (remainingPercent > 50) return 'var(--color-github-accent)'; // green
+                          if (remainingPercent > 20) return 'var(--color-github-warning)'; // yellow
+                          return 'var(--color-github-danger)'; // red
+                        })(),
+                      }}
+                    />
+                  </div>
                 </div>
-              )}
-            </aside>
-          </div>
-
-          {!isMobile && (
-            <div
-              className={`bg-github-border hover:bg-github-text-muted cursor-col-resize ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
-              style={{
-                width: isFileTreeOpen ? '4px' : '0px',
+                {isLadder ? null : revisionOptions ? (
+                  <DiffQuickMenu
+                    options={revisionOptions}
+                    selection={selectedRevision}
+                    resolvedBaseRevision={resolvedBaseRevision}
+                    resolvedTargetRevision={resolvedTargetRevision}
+                    onSelectDiff={(selection) => void handleRevisionChange(selection)}
+                    onOpenAdvanced={() => setIsRevisionModalOpen(true)}
+                    compact={!isDesktop}
+                  />
+                ) : (
+                  <span className="text-xs">
+                    Reviewing:{' '}
+                    <code className="bg-github-bg-tertiary px-1.5 py-0.5 rounded text-xs text-github-text-primary">
+                      {diffData.commit.includes('...') ? (
+                        <>
+                          <span className="text-github-text-secondary font-medium">
+                            {diffData.commit.split('...')[0]}...
+                          </span>
+                          <span className="font-medium">{diffData.commit.split('...')[1]}</span>
+                        </>
+                      ) : (
+                        diffData.commit
+                      )}
+                    </code>
+                  </span>
+                )}
+              </div>
+            </div>
+          </header>
+          {displayedLadder && (
+            <RungBar
+              ladder={displayedLadder}
+              view={ladderView}
+              onSelectView={(view) => {
+                void goToLadderView(view).then(() => {
+                  diffScrollContainerRef.current?.scrollTo({ top: 0 });
+                });
               }}
-              onMouseDown={handleMouseDown}
-              title="Drag to resize file list"
+              onToggleApproval={(index) => void toggleRungApproval(index)}
+              banner={ladderBanner}
+              onDismissBanner={() => setLadderBanner(null)}
+              onOpenUnplaced={() => setIsUnplacedOpen(true)}
+            />
+          )}
+          {session?.finished && (
+            <div
+              role="status"
+              className="border-b border-github-border bg-github-bg-tertiary px-4 py-2 text-sm text-github-text-primary"
+            >
+              Review finished — the agent has the summary. You can close this tab.
+            </div>
+          )}
+          {revisionOptions && !isLadder && (
+            <RevisionDetailModal
+              key={isRevisionModalOpen ? getDiffSelectionKey(selectedRevision) : 'closed'}
+              isOpen={isRevisionModalOpen}
+              onClose={() => setIsRevisionModalOpen(false)}
+              options={revisionOptions}
+              selection={selectedRevision}
+              resolvedBaseRevision={resolvedBaseRevision}
+              resolvedTargetRevision={resolvedTargetRevision}
+              onApply={(selection) => void handleRevisionChange(selection)}
             />
           )}
 
-          <main
-            ref={diffScrollContainerRef}
-            className={`flex-1 overflow-y-auto ${showMobileCommentsBar ? 'pb-16' : ''}`}
-          >
-            {/* General (file-independent) threads stay pinned above the files
-                in both list and focus mode. */}
-            <GeneralCommentsCard
-              threads={generalThreads}
-              isFormOpen={isGeneralFormOpen}
-              onFormOpenChange={setIsGeneralFormOpen}
-              onAddComment={handleAddGeneralComment}
-              showAuthorBadges={showAuthorBadges}
-              onGenerateThreadPrompt={handleGenerateThreadPrompt}
-              onRemoveThread={removeThread}
-              onReplyToThread={handleReplyToThread}
-              onRemoveMessage={removeMessage}
-              onUpdateMessage={updateMessage}
-              syntaxTheme={settings.syntaxTheme}
+          {isMobile && isFileTreeOpen && (
+            <button
+              type="button"
+              aria-label="Close file tree"
+              className="fixed inset-0 bg-black/40 z-30"
+              onClick={() => setIsFileTreeOpen(false)}
             />
-            {visibleFileEntries.map(({ file, fileIndex }) => {
-              const fileThreads = threadsByFile.get(file.path) ?? EMPTY_COMMENT_THREADS;
-              const mergedChunks =
-                getMergedChunksForVersion(mergedChunksState, diffDataVersion, file.path) ??
-                EMPTY_MERGED_CHUNKS;
-              const isRendered = renderedFilePaths.has(file.path);
-              const { directory: fileDirectory, basename: fileBasename } = splitFilePath(file.path);
-              return (
-                <div
-                  key={file.path}
-                  id={getFileElementId(file.path)}
-                  data-file-path={file.path}
-                  data-rendered={isRendered ? 'true' : 'false'}
-                  ref={(node) => registerLazyFileContainer(file.path, node)}
-                  className="mb-6"
-                  onMouseEnter={() => {
-                    hoveredFileIndexRef.current = fileIndex;
-                  }}
-                  onMouseLeave={() => {
-                    if (hoveredFileIndexRef.current === fileIndex) {
-                      hoveredFileIndexRef.current = null;
-                    }
-                  }}
-                >
-                  {isRendered ? (
-                    <DiffViewer
-                      file={file}
-                      threads={fileThreads}
-                      showAuthorBadges={showAuthorBadges}
-                      diffMode={diffMode}
-                      focusNav={focusNav}
-                      reviewedFiles={viewedFiles}
-                      isChangedSinceViewed={changedSinceViewedFiles.has(file.path)}
-                      onToggleReviewed={handleViewedButtonToggle}
-                      collapsedFiles={collapsedFiles}
-                      onToggleCollapsed={toggleFileCollapsed}
-                      onToggleAllCollapsed={toggleAllFilesCollapsed}
-                      onAddComment={handleAddComment}
-                      onGenerateThreadPrompt={handleGenerateThreadPrompt}
-                      onRemoveThread={removeThread}
-                      onReplyToThread={handleReplyToThread}
-                      onRemoveMessage={removeMessage}
-                      onUpdateMessage={updateMessage}
-                      onOpenInEditor={canOpenInEditor ? handleOpenInEditor : undefined}
-                      syntaxTheme={settings.syntaxTheme}
-                      baseCommitish={diffData.baseCommitish}
-                      targetCommitish={diffData.targetCommitish}
-                      cursor={cursor?.fileIndex === fileIndex ? cursor : null}
-                      isFocused={cursor?.fileIndex === fileIndex}
-                      fileIndex={fileIndex}
-                      onLineClick={handleLineClick}
-                      commentTrigger={
-                        commentTrigger?.fileIndex === fileIndex ? commentTrigger : null
-                      }
-                      onCommentTriggerHandled={handleCommentTriggerHandled}
-                      mergedChunks={mergedChunks}
-                      expandLines={expandLines}
-                      expandAllBetweenChunks={expandAllBetweenChunks}
-                      prefetchFileContent={prefetchFileContent}
-                      isExpandLoading={isExpandLoading}
-                      diffVersion={diffDataVersion}
-                    />
-                  ) : (
-                    <div className="bg-github-bg-secondary border border-github-border rounded-md px-4 py-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-xs uppercase tracking-wide text-github-text-muted">
-                            Deferred Rendering
-                          </div>
-                          <div className="text-sm font-mono text-github-text-primary min-w-0 flex items-baseline overflow-hidden">
-                            {fileDirectory !== '' && (
-                              <>
-                                <span
-                                  className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-                                  style={{ direction: 'rtl' }}
-                                >
-                                  {fileDirectory}
-                                </span>
-                                <span className="text-github-text-muted shrink-0">/</span>
-                              </>
-                            )}
-                            <span className="text-github-text-primary font-medium shrink-0 whitespace-nowrap">
-                              {fileBasename}
-                            </span>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => ensureFileRendered(file.path)}
-                          className="px-3 py-1.5 text-xs rounded border border-github-border text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary"
-                        >
-                          Load now
-                        </button>
-                      </div>
-                    </div>
-                  )}
+          )}
+
+          <div className="flex flex-1 overflow-hidden relative">
+            <div
+              className={`relative overflow-hidden ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
+              style={{
+                width: isMobile ? '0px' : isFileTreeOpen ? `${sidebarWidth}px` : '0px',
+              }}
+            >
+              <aside
+                id="file-tree-panel"
+                className={`bg-github-bg-secondary overflow-y-auto flex flex-col ${
+                  isMobile
+                    ? 'fixed inset-y-0 right-0 z-40 w-[min(85vw,360px)] border-l border-github-border transition-transform duration-300 ease-out'
+                    : 'relative border-r border-github-border'
+                }`}
+                style={{
+                  width: isMobile ? 'min(85vw, 360px)' : `${sidebarWidth}px`,
+                  minWidth: isMobile ? '0px' : '200px',
+                  maxWidth: isMobile ? 'none' : '600px',
+                  height: '100%',
+                  transform: isMobile
+                    ? isFileTreeOpen
+                      ? 'translateX(0)'
+                      : 'translateX(100%)'
+                    : undefined,
+                }}
+              >
+                <div className="flex-1 overflow-y-auto">
+                  <FileList
+                    files={diffData.files}
+                    onScrollToFile={handleScrollToFile}
+                    onFileSelected={isMobile ? handleMobileFileSelected : undefined}
+                    comments={openNormalizedThreads}
+                    reviewedFiles={viewedFiles}
+                    onToggleReviewed={toggleFileReviewed}
+                    onToggleFolderReviewed={toggleFolderReviewed}
+                    selectedFileIndex={activeFileIndex}
+                  />
                 </div>
-              );
-            })}
-          </main>
-        </div>
+                {!isMobile && (
+                  <div className="p-4 border-t border-github-border flex justify-between items-center">
+                    <button
+                      onClick={() => setIsHelpOpen(true)}
+                      className="flex items-center gap-1.5 text-github-text-secondary hover:text-github-text-primary transition-colors"
+                      title="Keyboard shortcuts (Shift+?)"
+                    >
+                      <Keyboard size={16} />
+                      <span className="text-sm">Shortcuts</span>
+                    </button>
+                    <a
+                      href="https://github.com/yoshiko-pg/difit"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 text-github-text-secondary hover:text-github-text-primary transition-colors"
+                      title="View on GitHub"
+                    >
+                      <span className="text-sm">Star on GitHub</span>
+                      <GitHubIcon style={{ height: '18px', width: '18px' }} />
+                    </a>
+                  </div>
+                )}
+              </aside>
+            </div>
 
-        {showMobileCommentsBar && (
-          <div className="fixed bottom-0 left-0 right-0 z-20 bg-github-bg-secondary border-t border-github-border px-4 py-2 flex justify-end">
-            <CommentsDropdown
-              commentsCount={threads.length}
-              isCopiedAll={isCopiedAll}
-              onCopyAll={handleCopyAllComments}
-              onDeleteAll={clearAllComments}
-              onViewAll={() => setIsCommentsListOpen(true)}
-              direction="up"
-              compact
-            />
+            {!isMobile && (
+              <div
+                className={`bg-github-border hover:bg-github-text-muted cursor-col-resize ${!isDragging ? '!transition-all !duration-300 !ease-in-out' : ''}`}
+                style={{
+                  width: isFileTreeOpen ? '4px' : '0px',
+                }}
+                onMouseDown={handleMouseDown}
+                title="Drag to resize file list"
+              />
+            )}
+
+            <main
+              ref={diffScrollContainerRef}
+              className={`flex-1 overflow-y-auto ${showMobileCommentsBar ? 'pb-16' : ''}`}
+            >
+              {/* General (file-independent) threads stay pinned above the files
+                in both list and focus mode. */}
+              <GeneralCommentsCard
+                threads={generalThreads}
+                isFormOpen={isGeneralFormOpen}
+                onFormOpenChange={setIsGeneralFormOpen}
+                onAddComment={handleAddGeneralComment}
+                showAuthorBadges={showAuthorBadges}
+                onGenerateThreadPrompt={handleGenerateThreadPrompt}
+                onRemoveThread={resolveThread}
+                onReplyToThread={handleReplyToThread}
+                onRemoveMessage={removeMessage}
+                onUpdateMessage={updateMessage}
+                syntaxTheme={settings.syntaxTheme}
+              />
+              {visibleFileEntries.map(({ file, fileIndex }) => {
+                const fileThreads = threadsByFile.get(file.path) ?? EMPTY_COMMENT_THREADS;
+                const mergedChunks =
+                  getMergedChunksForVersion(mergedChunksState, diffDataVersion, file.path) ??
+                  EMPTY_MERGED_CHUNKS;
+                const isRendered = renderedFilePaths.has(file.path);
+                const { directory: fileDirectory, basename: fileBasename } = splitFilePath(
+                  file.path,
+                );
+                return (
+                  <div
+                    key={file.path}
+                    id={getFileElementId(file.path)}
+                    data-file-path={file.path}
+                    data-rendered={isRendered ? 'true' : 'false'}
+                    ref={(node) => registerLazyFileContainer(file.path, node)}
+                    className="mb-6"
+                    onMouseEnter={() => {
+                      hoveredFileIndexRef.current = fileIndex;
+                    }}
+                    onMouseLeave={() => {
+                      if (hoveredFileIndexRef.current === fileIndex) {
+                        hoveredFileIndexRef.current = null;
+                      }
+                    }}
+                  >
+                    {isRendered ? (
+                      <DiffViewer
+                        file={file}
+                        threads={fileThreads}
+                        showAuthorBadges={showAuthorBadges}
+                        diffMode={diffMode}
+                        focusNav={focusNav}
+                        reviewedFiles={viewedFiles}
+                        isChangedSinceViewed={changedSinceViewedFiles.has(file.path)}
+                        onToggleReviewed={handleViewedButtonToggle}
+                        collapsedFiles={collapsedFiles}
+                        onToggleCollapsed={toggleFileCollapsed}
+                        onToggleAllCollapsed={toggleAllFilesCollapsed}
+                        onAddComment={handleAddComment}
+                        onGenerateThreadPrompt={handleGenerateThreadPrompt}
+                        onRemoveThread={resolveThread}
+                        onReplyToThread={handleReplyToThread}
+                        onRemoveMessage={removeMessage}
+                        onUpdateMessage={updateMessage}
+                        onOpenInEditor={canOpenInEditor ? handleOpenInEditor : undefined}
+                        syntaxTheme={settings.syntaxTheme}
+                        baseCommitish={diffData.baseCommitish}
+                        targetCommitish={diffData.targetCommitish}
+                        cursor={cursor?.fileIndex === fileIndex ? cursor : null}
+                        isFocused={cursor?.fileIndex === fileIndex}
+                        fileIndex={fileIndex}
+                        onLineClick={handleLineClick}
+                        commentTrigger={
+                          commentTrigger?.fileIndex === fileIndex ? commentTrigger : null
+                        }
+                        onCommentTriggerHandled={handleCommentTriggerHandled}
+                        mergedChunks={mergedChunks}
+                        expandLines={expandLines}
+                        expandAllBetweenChunks={expandAllBetweenChunks}
+                        prefetchFileContent={prefetchFileContent}
+                        isExpandLoading={isExpandLoading}
+                        diffVersion={diffDataVersion}
+                      />
+                    ) : (
+                      <div className="bg-github-bg-secondary border border-github-border rounded-md px-4 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-xs uppercase tracking-wide text-github-text-muted">
+                              Deferred Rendering
+                            </div>
+                            <div className="text-sm font-mono text-github-text-primary min-w-0 flex items-baseline overflow-hidden">
+                              {fileDirectory !== '' && (
+                                <>
+                                  <span
+                                    className="text-github-text-muted min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
+                                    style={{ direction: 'rtl' }}
+                                  >
+                                    {fileDirectory}
+                                  </span>
+                                  <span className="text-github-text-muted shrink-0">/</span>
+                                </>
+                              )}
+                              <span className="text-github-text-primary font-medium shrink-0 whitespace-nowrap">
+                                {fileBasename}
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => ensureFileRendered(file.path)}
+                            className="px-3 py-1.5 text-xs rounded border border-github-border text-github-text-secondary hover:text-github-text-primary hover:bg-github-bg-tertiary"
+                          >
+                            Load now
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </main>
           </div>
-        )}
 
-        {isSettingsOpen && (
-          <SettingsModal
-            isOpen={isSettingsOpen}
-            onClose={() => setIsSettingsOpen(false)}
-            settings={settings}
-            onSettingsChange={updateSettings}
+          {showMobileCommentsBar && (
+            <div className="fixed bottom-0 left-0 right-0 z-20 bg-github-bg-secondary border-t border-github-border px-4 py-2 flex justify-end">
+              <CommentsDropdown
+                commentsCount={openThreads.length}
+                isCopiedAll={isCopiedAll}
+                onCopyAll={handleCopyAllComments}
+                onDeleteAll={clearAllComments}
+                onViewAll={() => setIsCommentsListOpen(true)}
+                direction="up"
+                compact
+              />
+            </div>
+          )}
+
+          {isSettingsOpen && (
+            <SettingsModal
+              isOpen={isSettingsOpen}
+              onClose={() => setIsSettingsOpen(false)}
+              settings={settings}
+              onSettingsChange={updateSettings}
+            />
+          )}
+
+          <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
+
+          {isUnplacedOpen && (
+            <UnplacedThreadsDialog
+              currentRung={
+                currentRung ? { index: currentRung.index, subject: currentRung.subject } : null
+              }
+              onAttach={attachUnplacedThread}
+              onDelete={deleteUnplacedThread}
+              onClose={() => setIsUnplacedOpen(false)}
+            />
+          )}
+
+          {isFinishOpen && ladderInfo && (
+            <FinishReviewDialog
+              ladder={ladderInfo}
+              onConfirm={finishReview}
+              onClose={() => setIsFinishOpen(false)}
+            />
+          )}
+
+          <CommentsListModal
+            isOpen={isCommentsListOpen}
+            onClose={() => setIsCommentsListOpen(false)}
+            onNavigate={handleNavigateToComment}
+            comments={normalizedThreads}
+            showAuthorBadges={showAuthorBadges}
+            onRemoveThread={resolveThread}
+            onGenerateThreadPrompt={handleGenerateThreadPrompt}
+            onReplyToThread={handleReplyToThread}
+            onRemoveMessage={removeMessage}
+            onUpdateMessage={updateMessage}
+            syntaxTheme={settings.syntaxTheme}
           />
-        )}
-
-        <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
-
-        <CommentsListModal
-          isOpen={isCommentsListOpen}
-          onClose={() => setIsCommentsListOpen(false)}
-          onNavigate={handleNavigateToComment}
-          comments={normalizedThreads}
-          showAuthorBadges={showAuthorBadges}
-          onRemoveThread={removeThread}
-          onGenerateThreadPrompt={handleGenerateThreadPrompt}
-          onReplyToThread={handleReplyToThread}
-          onRemoveMessage={removeMessage}
-          onUpdateMessage={updateMessage}
-          syntaxTheme={settings.syntaxTheme}
-        />
-      </div>
-    </WordHighlightProvider>
+        </div>
+      </WordHighlightProvider>
+    </ReviewActionsProvider>
   );
 }
 

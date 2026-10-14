@@ -723,7 +723,11 @@ describe('App Component - Diff Mode Persistence', () => {
 
     await waitFor(() => {
       // 4 calls: initial /api/diff, /api/revisions, initial /api/comments sync, and refresh /api/diff
-      expect(mockGlobalFetch).toHaveBeenCalledTimes(4);
+      // (the review-session probe, /api/session, is not counted)
+      const calls = mockGlobalFetch.mock.calls.filter(
+        ([input]) => String(input) !== '/api/session',
+      );
+      expect(calls).toHaveLength(4);
     });
 
     await waitFor(() => {

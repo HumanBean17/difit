@@ -177,6 +177,60 @@ describe('commentImports', () => {
     });
   });
 
+  describe('threadId replies', () => {
+    it('parses a reply addressed only by threadId', () => {
+      const [parsed] = parseCommentImportValue(
+        '{"type":"reply","threadId":"thread-1","body":"Done","author":"agent"}',
+      );
+      expect(parsed).toMatchObject({ type: 'reply', threadId: 'thread-1', body: 'Done' });
+    });
+
+    it('survives a second normalization (CLI parses, server parses again)', () => {
+      const once = parseCommentImportValue('{"type":"reply","threadId":"t1","body":"Done"}');
+      const twice = parseCommentImportValue(JSON.stringify(once));
+      expect(twice[0]).toMatchObject({ type: 'reply', threadId: 't1', body: 'Done' });
+    });
+
+    it('replies to the addressed thread, including general threads', () => {
+      const existing = [
+        createThread({ id: 'thread-1', body: 'First' }),
+        createGeneralThread({ id: 'general-1', body: 'Overall' }),
+      ];
+      const result = mergeCommentImports(
+        existing,
+        parseCommentImportValue(
+          '[{"type":"reply","threadId":"general-1","body":"Answer","author":"agent"}]',
+        ),
+      );
+      expect(result.warnings).toEqual([]);
+      expect(result.threads[1]?.messages.map((message) => message.body)).toEqual([
+        'Overall',
+        'Answer',
+      ]);
+    });
+
+    it('warns when the addressed thread is missing', () => {
+      const result = mergeCommentImports(
+        [],
+        parseCommentImportValue('{"type":"reply","threadId":"nope","body":"x"}'),
+      );
+      expect(result.warnings[0]).toContain('thread nope');
+    });
+  });
+
+  describe('thread status', () => {
+    it('keeps the status of whichever copy changed last', () => {
+      const resolved = {
+        ...createThread({ id: 't', body: 'b', updatedAt: '2024-01-02T00:00:00.000Z' }),
+        status: 'resolved' as const,
+        resolvedAt: '2024-01-02T00:00:00.000Z',
+      };
+      const older = createThread({ id: 't', body: 'b' });
+      expect(mergeCommentThreads([older], [resolved]).threads[0]?.status).toBe('resolved');
+      expect(mergeCommentThreads([resolved], [older]).threads[0]?.status).toBe('resolved');
+    });
+  });
+
   describe('mergeCommentImports', () => {
     it('adds a new thread import', () => {
       vi.useFakeTimers();

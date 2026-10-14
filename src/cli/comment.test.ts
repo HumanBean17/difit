@@ -187,6 +187,33 @@ describe('comment subcommand integration', () => {
     });
   });
 
+  describe('wait', () => {
+    it('re-polls through timeouts and prints the first real event', async () => {
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse({ event: 'timeout' }))
+        .mockResolvedValueOnce(jsonResponse({ event: 'submit', threadIds: ['t1'], count: 1 }));
+
+      const command = createCommentCommand();
+      await command.parseAsync(['node', 'difit', 'wait', '--port', '4966']);
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(String(mockFetch.mock.calls[0]?.[0])).toContain('/api/review/wait?timeout=');
+      expect(consoleOutput[0]).toBe(
+        JSON.stringify({ event: 'submit', threadIds: ['t1'], count: 1 }),
+      );
+    });
+
+    it('handles connection error', async () => {
+      mockFetch.mockRejectedValue(new TypeError('fetch failed'));
+
+      const command = createCommentCommand();
+      await command.parseAsync(['node', 'difit', 'wait', '--port', '9999']);
+
+      expect(consoleErrors[0]).toContain('Cannot connect');
+      expect(process.exit).toHaveBeenCalledWith(1);
+    });
+  });
+
   describe('get', () => {
     it('fetches comments in text format by default', async () => {
       mockFetch.mockResolvedValue(textResponse('Comments output text'));
@@ -194,8 +221,21 @@ describe('comment subcommand integration', () => {
       const command = createCommentCommand();
       await command.parseAsync(['node', 'difit', 'get', '--port', '4966']);
 
-      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments-output');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:4966/api/comments-output?status=open',
+      );
       expect(consoleOutput[0]).toBe('Comments output text');
+    });
+
+    it('includes resolved threads with --all', async () => {
+      mockFetch.mockResolvedValue(textResponse('Comments output text'));
+
+      const command = createCommentCommand();
+      await command.parseAsync(['node', 'difit', 'get', '--port', '4966', '--all']);
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:4966/api/comments-output?status=all',
+      );
     });
 
     it('fetches comments in json format', async () => {
@@ -204,7 +244,7 @@ describe('comment subcommand integration', () => {
       const command = createCommentCommand();
       await command.parseAsync(['node', 'difit', 'get', '--port', '4966', '--format', 'json']);
 
-      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments-json');
+      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments-json?status=open');
       expect(consoleOutput[0]).toContain('"threads"');
     });
 
@@ -229,17 +269,17 @@ describe('comment subcommand integration', () => {
   });
 
   describe('resolve', () => {
-    it('sends DELETE requests for each thread ID', async () => {
+    it('sends a resolve request for each thread ID', async () => {
       mockFetch.mockResolvedValue(jsonResponse({ success: true, threadId: 'abc123', version: 2 }));
 
       const command = createCommentCommand();
       await command.parseAsync(['node', 'difit', 'resolve', '--port', '4966', 'abc123', 'def456']);
 
-      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments/abc123', {
-        method: 'DELETE',
+      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments/abc123/resolve', {
+        method: 'POST',
       });
-      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments/def456', {
-        method: 'DELETE',
+      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments/def456/resolve', {
+        method: 'POST',
       });
       expect(consoleOutput[0]).toBe(
         JSON.stringify({
@@ -258,8 +298,8 @@ describe('comment subcommand integration', () => {
       const command = createCommentCommand();
       await command.parseAsync(['node', 'difit', 'remove', '--port', '4966', 'abc123']);
 
-      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments/abc123', {
-        method: 'DELETE',
+      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments/abc123/resolve', {
+        method: 'POST',
       });
       expect(consoleOutput[0]).toContain('"success":true');
     });
@@ -270,9 +310,12 @@ describe('comment subcommand integration', () => {
       const command = createCommentCommand();
       await command.parseAsync(['node', 'difit', 'resolve', '--port', '4966', 'a/b c']);
 
-      expect(mockFetch).toHaveBeenCalledWith('http://localhost:4966/api/comments/a%2Fb%20c', {
-        method: 'DELETE',
-      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:4966/api/comments/a%2Fb%20c/resolve',
+        {
+          method: 'POST',
+        },
+      );
     });
 
     it('reports unknown thread IDs and exits with an error', async () => {

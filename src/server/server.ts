@@ -9,7 +9,8 @@ import open from 'open';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-import { type DiffMode } from '../types/watch.js';
+import { DiffMode } from '../types/watch.js';
+import type { LadderView, ReviewEvent, SessionInfo } from '../types/ladder.js';
 import { formatCommentsOutput } from '../utils/commentFormatting.js';
 import {
   mergeCommentImports,
@@ -24,9 +25,12 @@ import {
   resolveEditorOption,
 } from '../utils/editorOptions.js';
 import { getFileExtension } from '../utils/fileUtils.js';
+import { withThreadStatus } from '../utils/threadStatus.js';
 
 import { FileWatcherService } from './file-watcher.js';
 import { GitDiffParser } from './git-diff.js';
+import { LadderSession } from './ladder-session.js';
+import { ReviewEvents } from './review-events.js';
 import { parseUserSettingsPatch, readUserConfig, updateUserClientSettings } from './user-config.js';
 
 import {
@@ -60,10 +64,17 @@ interface ServerOptions {
   diffMode?: DiffMode;
   repoPath?: string;
   contextLines?: number;
+  // Review-ladder session over merge-base(base, branch)..branch.
+  ladder?: { base: string; commitish?: string };
+  // Finish ends the process; tests turn this off.
+  exitOnFinish?: boolean;
 }
 
 const GENERATED_STATUS_CACHE_TTL_MS = 60_000;
 const MAX_DIFF_CACHE_ENTRIES = 8;
+// Under undici's default 300s headers timeout, so `comment wait` re-polls instead of failing.
+const REVIEW_WAIT_MAX_MS = 240_000;
+const FINISH_EXIT_GRACE_MS = 60_000;
 
 function createDiffCacheKey(selection: DiffSelection, ignoreWhitespace: boolean) {
   return `${getDiffSelectionKey(selection)}\u0000${ignoreWhitespace ? '1' : '0'}`;
@@ -129,12 +140,32 @@ export async function startServer(
   const repositoryPath = resolve(options.repoPath ?? process.cwd());
   const repositoryId = createHash('sha256').update(repositoryPath).digest('hex');
   const initialCommentImports = options.commentImports || [];
-  const initialSelection = options.selection ?? createDiffSelection('', '');
+  const parser = new GitDiffParser(repositoryPath);
+  const ladderDiffCache = new Map<string, DiffResponse>();
+  const ladder = options.ladder
+    ? await LadderSession.open({
+        repoPath: repositoryPath,
+        base: options.ladder.base,
+        commitish: options.ladder.commitish,
+        // Rung diffs are keyed by full shas, so they never go stale.
+        loadDiff: async (selection) => {
+          const key = getDiffSelectionKey(selection);
+          const cached = ladderDiffCache.get(key);
+          if (cached) return cached;
+          const diff = await parser.parseDiff(selection, false, options.contextLines);
+          setCachedDiffResponse(ladderDiffCache, key, diff);
+          return diff;
+        },
+      })
+    : null;
+  const plainReviewEvents = new ReviewEvents();
+  const reviewEvents = ladder?.events ?? plainReviewEvents;
+  const initialSelection =
+    ladder?.initialSelection() ?? options.selection ?? createDiffSelection('', '');
   const commentImportId =
     initialCommentImports.length > 0
       ? createHash('sha256').update(serializeCommentImports(initialCommentImports)).digest('hex')
       : undefined;
-  const parser = new GitDiffParser(repositoryPath);
   const fileWatcher = new FileWatcherService();
   const generatedStatusCache = new Map<
     string,
@@ -249,7 +280,9 @@ export async function startServer(
 
   const commentSessions = new Map<string, CommentSessionState>();
   const initialCommentThreads = mergeCommentImports([], initialCommentImports).threads;
-  if (initialCommentThreads.length > 0) {
+  if (ladder && initialCommentImports.length > 0) {
+    ladder.applyImports(initialCommentImports);
+  } else if (initialCommentThreads.length > 0) {
     commentSessions.set(createCommentSessionKey(currentCommentSelection), {
       threads: initialCommentThreads,
       version: 1,
@@ -289,6 +322,58 @@ export async function startServer(
     };
     commentSessions.set(key, nextSession);
     return nextSession;
+  }
+
+  // The ladder view a browser request addresses (a rung or All), from its base/target query.
+  function getLadderViewFromQuery(query: Record<string, unknown>): LadderView | null {
+    if (!ladder) return null;
+    return ladder.resolveView(
+      typeof query.base === 'string' ? query.base : undefined,
+      typeof query.target === 'string' ? query.target : undefined,
+    );
+  }
+
+  function hasViewQuery(query: Record<string, unknown>): boolean {
+    return typeof query.base === 'string' || typeof query.target === 'string';
+  }
+
+  function allReviewThreads(): DiffCommentThread[] {
+    if (ladder) return ladder.allThreads();
+    return [...commentSessions.values()].flatMap((session) => session.threads);
+  }
+
+  function broadcastCommentsChanged(version: number) {
+    fileWatcher.broadcast({
+      type: 'commentsChanged',
+      version,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  function broadcastReviewChanged(finished = false) {
+    fileWatcher.broadcast({
+      type: 'reviewChanged',
+      ...(finished ? { finished: true } : {}),
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  function includeResolved(query: Record<string, unknown>): boolean {
+    return query.status !== 'open';
+  }
+
+  function setPlainThreadStatus(threadId: string, status: 'open' | 'resolved'): boolean {
+    for (const session of commentSessions.values()) {
+      const thread = session.threads.find((candidate) => candidate.id === threadId);
+      if (!thread) continue;
+      session.threads = session.threads.map((candidate) =>
+        candidate.id === threadId ? withThreadStatus(candidate, status) : candidate,
+      );
+      session.version += 1;
+      broadcastCommentsChanged(session.version);
+      return true;
+    }
+    return false;
   }
 
   app.get('/api/diff', async (req, res) => {
@@ -367,6 +452,7 @@ export async function startServer(
       repositoryId,
       commentImports: shouldIncludeCommentImports ? initialCommentImports : undefined,
       commentImportId: shouldIncludeCommentImports ? commentImportId : undefined,
+      ...(ladder ? { serverOwnedComments: true } : {}),
     });
   });
 
@@ -767,11 +853,45 @@ export async function startServer(
     return true;
   }
 
-  app.post('/api/comments', (req, res) => {
+  // Applies a browser's thread list for its view; shared by save and submit.
+  async function applyBrowserThreads(
+    query: Record<string, unknown>,
+    body: unknown,
+  ): Promise<{ merged: boolean; version: number; threads: DiffCommentThread[] }> {
+    const nextThreads = parseCommentsPayload(body);
+    const baseVersion = parseBaseVersion(body);
+    const view = getLadderViewFromQuery(query);
+    if (ladder && view) {
+      const result = await ladder.updateView(view, nextThreads, baseVersion);
+      if (result.changed) broadcastCommentsChanged(ladder.version);
+      return {
+        merged: result.merged,
+        version: ladder.version,
+        threads: await ladder.threadsFor(view),
+      };
+    }
+
+    const selection = getCommentSelectionFromQuery(query);
+    const session = getOrCreateCommentSession(selection);
+    const isStale = typeof baseVersion === 'number' && baseVersion !== session.version;
+    updateCommentSession(
+      selection,
+      isStale ? mergeCommentThreads(session.threads, nextThreads).threads : nextThreads,
+    );
+    return { merged: isStale, version: session.version, threads: session.threads };
+  }
+
+  app.post('/api/comments', async (req, res) => {
     try {
-      const selection = getCommentSelectionFromQuery(req.query as Record<string, unknown>);
       const body: unknown =
         typeof req.body === 'string' ? (JSON.parse(req.body) as unknown) : req.body;
+      if (ladder && getLadderViewFromQuery(req.query as Record<string, unknown>)) {
+        const result = await applyBrowserThreads(req.query as Record<string, unknown>, body);
+        res.json({ success: true, ...result });
+        return;
+      }
+
+      const selection = getCommentSelectionFromQuery(req.query as Record<string, unknown>);
       const nextThreads = parseCommentsPayload(body);
       const baseVersion = parseBaseVersion(body);
       const session = getOrCreateCommentSession(selection);
@@ -799,6 +919,23 @@ export async function startServer(
 
   app.post('/api/comment-imports', (req, res) => {
     try {
+      if (ladder) {
+        const commentImports = parseCommentImportsPayload(req.body);
+        const importId = createHash('sha256')
+          .update(serializeCommentImports(commentImports))
+          .digest('hex');
+        const result = ladder.applyImports(commentImports);
+        if (result.changed) broadcastCommentsChanged(ladder.version);
+        res.json({
+          success: true,
+          changed: result.changed,
+          count: commentImports.length,
+          importId,
+          warnings: result.warnings,
+        });
+        return;
+      }
+
       const selection = getCommentSelectionFromQuery(req.query as Record<string, unknown>);
       const session = getOrCreateCommentSession(selection);
       const commentImports = parseCommentImportsPayload(req.body);
@@ -821,7 +958,36 @@ export async function startServer(
     }
   });
 
+  app.post('/api/comments/:threadId/:action', (req, res) => {
+    const { threadId, action } = req.params;
+    if (action !== 'resolve' && action !== 'reopen') {
+      res.status(404).json({ error: `Unknown action: ${action}` });
+      return;
+    }
+    const status = action === 'resolve' ? 'resolved' : 'open';
+    const found = ladder
+      ? ladder.setStatus(threadId, status)
+      : setPlainThreadStatus(threadId, status);
+    if (!found) {
+      res.status(404).json({ error: `Thread not found: ${threadId}` });
+      return;
+    }
+    if (ladder) broadcastCommentsChanged(ladder.version);
+    broadcastReviewChanged();
+    res.json({ success: true, threadId, status });
+  });
+
   app.delete('/api/comments/:threadId', (req, res) => {
+    if (ladder) {
+      if (!ladder.deleteThread(req.params.threadId)) {
+        res.status(404).json({ error: `Thread not found: ${req.params.threadId}` });
+        return;
+      }
+      broadcastCommentsChanged(ladder.version);
+      res.json({ success: true, threadId: req.params.threadId, version: ladder.version });
+      return;
+    }
+
     const selection = getCommentSelectionFromQuery(req.query as Record<string, unknown>);
     const session = getOrCreateCommentSession(selection);
     const threadId = req.params.threadId;
@@ -841,22 +1007,66 @@ export async function startServer(
     });
   });
 
-  app.get('/api/comments-json', (req, res) => {
-    const selection = getCommentSelectionFromQuery(req.query as Record<string, unknown>);
+  app.get('/api/comments-json', async (req, res) => {
+    const query = req.query as Record<string, unknown>;
+    if (ladder) {
+      const view = getLadderViewFromQuery(query);
+      if (view) {
+        res.json({ version: ladder.version, threads: await ladder.threadsFor(view) });
+        return;
+      }
+      if (!hasViewQuery(query)) {
+        // CLI read: the whole ladder, each thread tagged with its rung.
+        const info = await ladder.info();
+        res.json({
+          version: ladder.version,
+          mode: DiffMode.LADDER,
+          ladder: {
+            base: info.base,
+            baseSha: info.baseSha,
+            branch: info.branch,
+            tipSha: info.tipSha,
+            rungs: info.rungs.map(({ index, sha, subject, approval, openThreads }) => ({
+              index,
+              sha,
+              subject,
+              approval,
+              openThreads,
+            })),
+          },
+          threads: ladder.cliThreads(includeResolved(query)),
+        });
+        return;
+      }
+    }
+
+    const selection = getCommentSelectionFromQuery(query);
     const session = getOrCreateCommentSession(selection);
     res.json({
       version: session.version,
-      threads: session.threads,
+      mode: options.stdinDiff ? 'stdin' : (options.diffMode ?? DiffMode.DEFAULT),
+      threads: includeResolved(query)
+        ? session.threads
+        : session.threads.filter((thread) => thread.status !== 'resolved'),
     });
   });
 
-  app.get('/api/comments-output', (req, res) => {
-    const selection = getCommentSelectionFromQuery(req.query as Record<string, unknown>);
-    const session = getOrCreateCommentSession(selection);
+  app.get('/api/comments-output', async (req, res) => {
+    const query = req.query as Record<string, unknown>;
+    const view = getLadderViewFromQuery(query);
+    const sessionThreads =
+      ladder && view
+        ? await ladder.threadsFor(view)
+        : ladder && !hasViewQuery(query)
+          ? ladder.allThreads()
+          : getOrCreateCommentSession(getCommentSelectionFromQuery(query)).threads;
+    const threads = includeResolved(query)
+      ? sessionThreads
+      : sessionThreads.filter((thread) => thread.status !== 'resolved');
     res.type('text/plain');
 
-    if (session.threads.length > 0) {
-      const output = formatCommentsOutput(session.threads.map(toCommentThread));
+    if (threads.length > 0) {
+      const output = formatCommentsOutput(threads.map(toCommentThread));
       res.send(output);
     } else {
       res.send('');
@@ -995,11 +1205,131 @@ export async function startServer(
 
   // Function to output comments when server shuts down
   function outputFinalComments() {
-    const session = getOrCreateCommentSession(currentCommentSelection);
-    if (session.threads.length > 0) {
-      console.log(formatCommentsOutput(session.threads.map(toCommentThread)));
+    const threads = ladder
+      ? ladder.allThreads().filter((thread) => thread.status !== 'resolved')
+      : getOrCreateCommentSession(currentCommentSelection).threads;
+    if (threads.length > 0) {
+      console.log(formatCommentsOutput(threads.map(toCommentThread)));
     }
   }
+
+  let finishExitTimer: NodeJS.Timeout | null = null;
+  function exitAfterFinish(delayMs: number) {
+    if (options.exitOnFinish === false) return;
+    if (finishExitTimer) clearTimeout(finishExitTimer);
+    finishExitTimer = setTimeout(() => {
+      void fileWatcher.stop().finally(() => process.exit(0));
+    }, delayMs);
+  }
+
+  app.get('/api/session', async (_req, res) => {
+    const info: SessionInfo = {
+      mode: ladder
+        ? DiffMode.LADDER
+        : options.stdinDiff
+          ? 'stdin'
+          : (options.diffMode ?? DiffMode.DEFAULT),
+      ...(ladder ? { ladder: await ladder.info() } : {}),
+      pendingCount: reviewEvents.pending(allReviewThreads()).messageIds.length,
+      finished: ladder?.isFinished ?? false,
+    };
+    res.json(info);
+  });
+
+  // Submit: hands every pending user message to the agent's `difit comment wait`.
+  // A body with the browser's threads is applied first, so save + submit is one step.
+  app.post('/api/review/submit', async (req, res) => {
+    try {
+      const body: unknown =
+        typeof req.body === 'string' && req.body.length > 0
+          ? (JSON.parse(req.body) as unknown)
+          : req.body;
+      if (body && typeof body === 'object' && 'threads' in body) {
+        await applyBrowserThreads(req.query as Record<string, unknown>, body);
+      }
+      const result = reviewEvents.submit(allReviewThreads());
+      broadcastReviewChanged();
+      res.json({ success: true, ...result });
+    } catch (error) {
+      console.error('Error submitting review:', error);
+      res.status(400).json({ error: 'Invalid submit payload' });
+    }
+  });
+
+  app.get('/api/review/wait', async (req, res) => {
+    const requested = Number.parseInt(String(req.query.timeout ?? ''), 10);
+    const timeoutMs =
+      Number.isFinite(requested) && requested > 0
+        ? Math.min(requested, REVIEW_WAIT_MAX_MS)
+        : REVIEW_WAIT_MAX_MS;
+    const controller = new AbortController();
+    res.on('close', () => controller.abort());
+    const event: ReviewEvent = await reviewEvents.wait(timeoutMs, controller.signal);
+    if (controller.signal.aborted) {
+      // The waiter left; keep a real event for the next one.
+      if (event.event !== 'timeout') reviewEvents.emit(event);
+      return;
+    }
+    res.json(event);
+    if (event.event === 'finish') exitAfterFinish(1000);
+  });
+
+  app.post('/api/review/finish', async (_req, res) => {
+    if (!ladder) {
+      res.status(400).json({ error: 'Finish is only available in --ladder sessions' });
+      return;
+    }
+    if (ladder.isFinished) {
+      res.status(409).json({ error: 'Review already finished' });
+      return;
+    }
+    const summary = await ladder.finishSummary();
+    const stateFile = ladder.finish();
+    const delivered = reviewEvents.hasWaiter();
+    reviewEvents.emit({ event: 'finish', at: new Date().toISOString(), ...summary });
+    broadcastReviewChanged(true);
+    res.json({ success: true, stateFile, ...summary });
+    exitAfterFinish(delivered ? 1000 : FINISH_EXIT_GRACE_MS);
+  });
+
+  app.post('/api/ladder/approve', async (req, res) => {
+    const body = (typeof req.body === 'string' ? JSON.parse(req.body) : req.body) as {
+      index?: unknown;
+      approved?: unknown;
+    };
+    if (!ladder || typeof body.index !== 'number') {
+      res.status(400).json({ error: 'Expected { index, approved } in a --ladder session' });
+      return;
+    }
+    const ok = await ladder.setApproval(body.index, body.approved !== false);
+    if (!ok) {
+      res.status(404).json({ error: `No rung ${body.index}` });
+      return;
+    }
+    broadcastReviewChanged();
+    res.json({ success: true });
+  });
+
+  app.get('/api/ladder/unplaced', (_req, res) => {
+    res.json({ threads: ladder ? ladder.unplacedThreads() : [] });
+  });
+
+  app.post('/api/ladder/threads/:threadId/attach', (req, res) => {
+    const body = (typeof req.body === 'string' ? JSON.parse(req.body) : req.body) as {
+      index?: unknown;
+    };
+    if (!ladder || typeof body.index !== 'number') {
+      res.status(400).json({ error: 'Expected { index } in a --ladder session' });
+      return;
+    }
+    if (!ladder.attach(req.params.threadId, body.index)) {
+      res.status(404).json({ error: 'Thread or rung not found' });
+      return;
+    }
+    broadcastCommentsChanged(ladder.version);
+    broadcastReviewChanged();
+    res.json({ success: true });
+  });
 
   // SSE endpoint for file watching
   app.get('/api/watch', (req, res) => {
@@ -1097,7 +1427,27 @@ export async function startServer(
   }
 
   // Start file watcher
-  if (options.diffMode) {
+  if (ladder) {
+    // Follow the branch ref: a rewrite re-lists the rungs and tells browsers to reload.
+    fileWatcher.setChangeHandler(async () => {
+      if (ladder.isFinished || !(await ladder.refresh())) return null;
+      invalidateCache();
+      broadcastCommentsChanged(ladder.version);
+      return {
+        type: 'reload',
+        diffMode: DiffMode.LADDER,
+        changeType: 'commit',
+        timestamp: new Date().toISOString(),
+        message: `Ladder ${ladder.branch} rewritten`,
+      };
+    });
+    try {
+      await fileWatcher.start(DiffMode.LADDER, repositoryPath, 300, invalidateCache, ladder.branch);
+    } catch (error) {
+      console.warn('⚠️  File watcher failed to start:', error);
+      console.warn('   Continuing without file watching...');
+    }
+  } else if (options.diffMode) {
     try {
       await fileWatcher.start(options.diffMode, repositoryPath, 300, invalidateCache);
     } catch (error) {

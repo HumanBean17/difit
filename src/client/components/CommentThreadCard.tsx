@@ -1,7 +1,17 @@
-import { Check, ChevronDown, ChevronRight, Copy, Edit2, MessageSquare, Trash2 } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Edit2,
+  MessageSquare,
+  RotateCcw,
+  Trash2,
+} from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 
 import { type CommentThread, type DiffCommentMessage } from '../../types/diff';
+import { useReviewActions } from '../contexts/ReviewActionsContext';
 import { useClickOutside } from '../hooks/useClickOutside';
 import { copyTextToClipboard } from '../utils/clipboard';
 
@@ -214,7 +224,14 @@ export function CommentThreadCard({
 }: CommentThreadCardProps) {
   const [isCopied, setIsCopied] = useState(false);
   const [isReplying, setIsReplying] = useState(false);
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  const isResolved = thread.status === 'resolved';
+  const [isCollapsed, setIsCollapsed] = useState(isResolved);
+  const { reopenThread, deleteThread } = useReviewActions();
+
+  // Resolving collapses the thread; it stays as history.
+  useEffect(() => {
+    if (isResolved) setIsCollapsed(true);
+  }, [isResolved]);
   const lineLabel = Array.isArray(thread.line)
     ? `${thread.line[0]}-${thread.line[1]}`
     : thread.line;
@@ -270,6 +287,14 @@ export function CommentThreadCard({
           >
             {locationLabel}
           </span>
+          {isResolved && (
+            <span
+              className="inline-flex h-5 shrink-0 items-center rounded-full border border-green-700/60 px-2 text-[10px] font-medium text-green-700"
+              aria-label="Resolved thread"
+            >
+              Resolved
+            </span>
+          )}
           {thread.isOutdated && (
             <span
               className="inline-flex h-5 shrink-0 items-center rounded-full border border-github-text-muted px-2 text-[10px] font-medium text-github-text-muted"
@@ -299,6 +324,20 @@ export function CommentThreadCard({
             </button>
           )}
         </div>
+        {isResolved && reopenThread && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              reopenThread(thread.id);
+            }}
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded border border-github-border bg-github-bg-secondary px-2 py-1 text-xs text-github-text-primary transition-all hover:bg-github-bg-primary"
+            title="Reopen thread"
+          >
+            <RotateCcw size={12} />
+            Reopen
+          </button>
+        )}
         {!isCollapsed && (
           <div className="flex items-center gap-2">
             <button
@@ -323,18 +362,35 @@ export function CommentThreadCard({
 
       {!isCollapsed && (
         <div className="space-y-3">
-          <ThreadMessageItem
-            message={rootMessage}
-            isRootMessage={true}
-            showAuthorBadge={showAuthorBadges}
-            syntaxTheme={syntaxTheme}
-            filename={thread.file ?? undefined}
-            originalCode={thread.codeContent}
-            onUpdate={(newBody) => onUpdateMessage(thread.id, rootMessage.id, newBody)}
-            onResolveOrDelete={() => onRemoveThread(thread.id)}
-            actionLabel="Resolve thread"
-            confirmPrompt={confirmRootAction ? 'Resolve?' : undefined}
-          />
+          {isResolved ? (
+            // A resolved thread's root action deletes it for good.
+            <ThreadMessageItem
+              message={rootMessage}
+              showAuthorBadge={showAuthorBadges}
+              syntaxTheme={syntaxTheme}
+              filename={thread.file ?? undefined}
+              originalCode={thread.codeContent}
+              onUpdate={(newBody) => onUpdateMessage(thread.id, rootMessage.id, newBody)}
+              onResolveOrDelete={() =>
+                deleteThread ? deleteThread(thread.id) : onRemoveThread(thread.id)
+              }
+              actionLabel="Delete thread"
+              confirmPrompt="Delete?"
+            />
+          ) : (
+            <ThreadMessageItem
+              message={rootMessage}
+              isRootMessage={true}
+              showAuthorBadge={showAuthorBadges}
+              syntaxTheme={syntaxTheme}
+              filename={thread.file ?? undefined}
+              originalCode={thread.codeContent}
+              onUpdate={(newBody) => onUpdateMessage(thread.id, rootMessage.id, newBody)}
+              onResolveOrDelete={() => onRemoveThread(thread.id)}
+              actionLabel="Resolve thread"
+              confirmPrompt={confirmRootAction ? 'Resolve?' : undefined}
+            />
+          )}
 
           {thread.messages.slice(1).map((message) => (
             <div key={message.id} className="ml-4 border-l border-github-border pl-3">
