@@ -16,6 +16,7 @@ import {
 } from '../../utils/commentFormatting';
 import { createId } from '../../utils/createId';
 import { mergeCommentImports } from '../../utils/commentImports';
+import { withThreadStatus } from '../../utils/threadStatus';
 import { storageService } from '../services/StorageService';
 import { getLanguageFromPath } from '../utils/diffUtils';
 
@@ -43,6 +44,8 @@ interface UseDiffCommentsReturn {
   removeComment: (commentId: string) => void;
   replyToThread: (params: ReplyToThreadParams) => void;
   removeThread: (threadId: string) => void;
+  resolveThread: (threadId: string) => void;
+  reopenThread: (threadId: string) => void;
   updateComment: (commentId: string, newBody: string) => void;
   removeMessage: (threadId: string, messageId: string) => void;
   updateMessage: (threadId: string, messageId: string, newBody: string) => void;
@@ -67,6 +70,7 @@ function normalizeThread(thread: DiffCommentThread): CommentThread {
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
     codeContent: thread.codeSnapshot?.content,
+    status: thread.status,
     messages: thread.messages,
   };
 }
@@ -298,6 +302,28 @@ export function useDiffComments(
     [saveThreads, threads],
   );
 
+  const resolveThread = useCallback(
+    (threadId: string) => {
+      saveThreads(
+        threads.map((thread) =>
+          thread.id === threadId ? withThreadStatus(thread, 'resolved') : thread,
+        ),
+      );
+    },
+    [saveThreads, threads],
+  );
+
+  const reopenThread = useCallback(
+    (threadId: string) => {
+      saveThreads(
+        threads.map((thread) =>
+          thread.id === threadId ? withThreadStatus(thread, 'open') : thread,
+        ),
+      );
+    },
+    [saveThreads, threads],
+  );
+
   const removeComment = useCallback(
     (commentId: string) => {
       removeThread(commentId);
@@ -493,6 +519,8 @@ export function useDiffComments(
     removeComment,
     replyToThread,
     removeThread,
+    resolveThread,
+    reopenThread,
     updateComment,
     removeMessage,
     updateMessage,

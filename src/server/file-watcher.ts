@@ -10,7 +10,12 @@ interface FileWatcherConfig {
   diffMode: DiffMode;
   debounceMs: number;
   onCacheInvalidate?: () => void;
+  // LADDER mode: the branch whose ref is followed.
+  branch?: string;
 }
+
+// Decides what a detected change means; null suppresses the broadcast.
+type ChangeHandler = () => Promise<WatchEvent | null>;
 
 interface ModeWatchConfig {
   watchPaths: string[];
@@ -45,6 +50,10 @@ const MODE_WATCH_CONFIGS: Record<DiffMode, ModeWatchConfig> = {
     watchPaths: [], // No watching for specific commits
     ignore: [],
   },
+  [DiffMode.LADDER]: {
+    watchPaths: ['.git'],
+    ignore: ['.git/objects/**', '.git/logs/**', '.git/difit/**', 'node_modules/**'],
+  },
 };
 
 export class FileWatcherService {
@@ -53,16 +62,22 @@ export class FileWatcherService {
   private debounceTimer: NodeJS.Timeout | null = null;
   private config: FileWatcherConfig | null = null;
   private git: SimpleGit | null = null;
+  private changeHandler: ChangeHandler | null = null;
 
   constructor() {}
+
+  setChangeHandler(handler: ChangeHandler | null): void {
+    this.changeHandler = handler;
+  }
 
   async start(
     diffMode: DiffMode,
     watchPath: string,
     debounceMs = 300,
     onCacheInvalidate?: () => void,
+    branch?: string,
   ): Promise<void> {
-    this.config = { watchPath, diffMode, debounceMs, onCacheInvalidate };
+    this.config = { watchPath, diffMode, debounceMs, onCacheInvalidate, branch };
 
     // Stop existing watchers
     await this.stop();
@@ -124,7 +139,10 @@ export class FileWatcherService {
               // For git directory watching, only care about specific files
               if (watchPath === '.git') {
                 const fileName = event.path.replace(/.*[/\\]/, '');
-                const isRelevantGitFile = this.isRelevantGitFile(fileName, this.config?.diffMode);
+                const isRelevantGitFile =
+                  this.config?.diffMode === DiffMode.LADDER
+                    ? this.isLadderRefFile(event.path)
+                    : this.isRelevantGitFile(fileName, this.config?.diffMode);
                 if (!isRelevantGitFile) {
                   continue;
                 }
@@ -197,6 +215,16 @@ export class FileWatcherService {
     }
   }
 
+  private isLadderRefFile(filePath: string): boolean {
+    const normalized = filePath.replace(/\\/g, '/');
+    const branch = this.config?.branch;
+    return (
+      normalized.endsWith('/packed-refs') ||
+      normalized.endsWith('/HEAD') ||
+      (branch !== undefined && normalized.endsWith(`/refs/heads/${branch}`))
+    );
+  }
+
   private debouncedBroadcast(): void {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
@@ -207,6 +235,16 @@ export class FileWatcherService {
       // Invalidate cache before broadcasting change
       if (this.config?.onCacheInvalidate) {
         this.config.onCacheInvalidate();
+      }
+      if (this.changeHandler) {
+        void this.changeHandler()
+          .then((event) => {
+            if (event) this.broadcast(event);
+          })
+          .catch((error: unknown) => {
+            console.error('Change handler failed:', error);
+          });
+        return;
       }
       this.broadcastChange();
     }, debounceMs);
@@ -296,6 +334,7 @@ export class FileWatcherService {
     switch (this.config.diffMode) {
       case DiffMode.DEFAULT:
       case DiffMode.DOT:
+      case DiffMode.LADDER:
         return 'commit'; // .git/HEAD changes indicate new commits
       case DiffMode.STAGED:
         return 'staging'; // .git/index changes

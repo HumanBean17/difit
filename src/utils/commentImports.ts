@@ -127,7 +127,19 @@ function normalizeCommentImportEntry(value: unknown): CommentImport {
     throw new Error('Invalid comment import field: type');
   }
 
-  if (typeof value.filePath !== 'string' || value.filePath.trim().length === 0) {
+  const threadId =
+    value.type === 'reply' ? normalizeOptionalString(value.threadId, 'threadId') : undefined;
+  if (threadId !== undefined && threadId.trim().length === 0) {
+    throw new Error('Invalid comment import field: threadId');
+  }
+  // A reply addressed by threadId needs no file/position anchor.
+  const hasAnchor = typeof value.filePath === 'string' && value.filePath.trim().length > 0;
+  const useAnchorlessReply = threadId !== undefined && !hasAnchor;
+
+  if (
+    !useAnchorlessReply &&
+    (typeof value.filePath !== 'string' || value.filePath.trim().length === 0)
+  ) {
     throw new Error('Invalid comment import field: filePath');
   }
 
@@ -137,8 +149,11 @@ function normalizeCommentImportEntry(value: unknown): CommentImport {
   const normalized = {
     type: value.type,
     id: normalizeOptionalString(value.id, 'id'),
-    filePath: value.filePath,
-    position: normalizePosition(value.position),
+    ...(threadId !== undefined ? { threadId } : {}),
+    filePath: useAnchorlessReply ? '' : value.filePath,
+    position: useAnchorlessReply
+      ? { side: 'new' as const, line: 1 }
+      : normalizePosition(value.position),
     body: normalizeRequiredBody(value.body),
     author: normalizeOptionalString(value.author, 'author'),
     createdAt,
@@ -344,6 +359,8 @@ function cloneThread(thread: DiffCommentThread): DiffCommentThread {
     position: clonePosition(thread.position),
     codeSnapshot: cloneCodeSnapshot(thread.codeSnapshot),
     messages: thread.messages.map(cloneMessage),
+    ...(thread.status !== undefined ? { status: thread.status } : {}),
+    ...(thread.resolvedAt !== undefined ? { resolvedAt: thread.resolvedAt } : {}),
   };
 }
 
@@ -434,8 +451,16 @@ function mergeThread(
     maxIsoTimestamp(existingThread.updatedAt, incomingThread.updatedAt),
   );
 
+  // Status follows whichever side changed the thread last.
+  const statusSource =
+    incomingThread.updatedAt.localeCompare(existingThread.updatedAt) >= 0
+      ? incomingThread
+      : existingThread;
+
   return {
     ...cloneThread(existingThread),
+    status: statusSource.status,
+    resolvedAt: statusSource.resolvedAt,
     createdAt:
       existingThread.createdAt.localeCompare(incomingThread.createdAt) <= 0
         ? existingThread.createdAt
@@ -479,6 +504,7 @@ export function serializeCommentImports(commentImports: CommentImport[]): string
     commentImports.map((commentImport) => ({
       type: commentImport.type,
       id: commentImport.id,
+      threadId: commentImport.type === 'reply' ? commentImport.threadId : undefined,
       filePath: commentImport.filePath,
       position: {
         side: commentImport.position.side,
@@ -521,18 +547,22 @@ export function mergeCommentImports(
       continue;
     }
 
-    const targetThreads = threads
-      .filter(
-        (thread) =>
-          thread.filePath === commentImport.filePath &&
-          positionsMatch(thread.position, commentImport.position),
-      )
-      .sort(sortByNewestThread);
+    const targetThread =
+      commentImport.threadId !== undefined
+        ? threads.find((thread) => thread.id === commentImport.threadId)
+        : threads
+            .filter(
+              (thread) =>
+                thread.filePath === commentImport.filePath &&
+                positionsMatch(thread.position, commentImport.position),
+            )
+            .sort(sortByNewestThread)[0];
 
-    const targetThread = targetThreads[0];
     if (!targetThread) {
       warnings.push(
-        `Skipped reply import for ${commentImport.filePath}:${getPositionKey(commentImport.position)} because no matching thread was found.`,
+        commentImport.threadId !== undefined
+          ? `Skipped reply import for thread ${commentImport.threadId} because no matching thread was found.`
+          : `Skipped reply import for ${commentImport.filePath}:${getPositionKey(commentImport.position)} because no matching thread was found.`,
       );
       continue;
     }

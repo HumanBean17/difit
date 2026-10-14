@@ -156,6 +156,25 @@ Stdin mode is selected with intent-first rules:
 | `--keep-alive`        | false           | Keep server running after browser disconnects (stop manually with Ctrl+C)                               |
 | `--background`        | false           | Keep the server running in the background and output JSON connection info                               |
 | `--context <lines>`   | git default (3) | Limit surrounding context lines per change (`0` shows changes only; not available with `--pr` or stdin) |
+| `--ladder <base>`     | -               | Review ladder: step the commits of `merge-base(base, branch)..branch` (see below)                       |
+
+### Review ladder
+
+```bash
+difit --ladder main            # rungs of the current branch on main
+difit --ladder main feature-x  # rungs of another local branch
+```
+
+One long-lived session over a branch's commits ("rungs", oldest first), built for an agent that amends rungs in place (`fixup!` + `git rebase --autosquash`):
+
+- **Follows the branch ref.** A commit or rebase reloads the view and keeps you on the same rung, with a banner showing its old → new sha. An unsaved comment holds the reload behind the Refresh button.
+- **Rung bar.** `3/5 · subject`, the rung's `Verify:` claims as a checklist, `<` / `>` to step, and a rung list with an **All** entry (net diff).
+- **Threads keep their rung** across rewrites and restarts. The server owns them in `.git/difit/<branch>@<base-sha>.json`. A thread whose rung changed subject goes to **Unplaced** instead of being guessed. A comment made in **All** is tagged with the rung that added (or removed) the line.
+- **Approve** a rung with `a`. The approval is tied to its `git patch-id`, so a fix that changes the rung shows it as _changed since approved_.
+- **Submit.** A saved comment stays pending; **Submit (n)** or Cmd/Ctrl+Enter in a comment hands pending comments to an agent blocked on `difit comment wait --port <N>`.
+- **Finish** lists unapproved rungs and open threads, wakes `comment wait` with a summary, sets the state file aside as `….json.finished`, and stops the server.
+
+Agent-side commands: `difit comment wait --port <N>` (blocks; prints `{"event":"submit"|"finish",…}`), `difit comment get --port <N> --format json` (`--all` includes resolved threads; in a ladder session each thread carries its `rung`), and replies by id: `difit comment add --port <N> '{"type":"reply","threadId":"<id>","body":"…","author":"agent"}'`. Resolving keeps the thread as resolved history.
 
 ## 💬 Comment System
 
@@ -165,7 +184,8 @@ difit includes a review comment system that makes it easy to provide feedback to
 2. **Edit Comments**: Edit existing comments with the edit button
 3. **Generate Prompts**: Comments include a "Copy Prompt" button that formats the context for AI coding agents
 4. **Copy All**: Use "Copy All Prompt" to copy all comments in a structured format
-5. **Persistent Storage**: Comments are saved in browser localStorage per commit
+5. **Persistent Storage**: Comments are saved in browser localStorage per commit (server-side per branch in `--ladder` sessions)
+6. **Resolve**: Resolving collapses a thread and keeps it as history; reopen or delete it from the thread
 
 ### Comment Prompt Format
 

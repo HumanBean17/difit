@@ -310,6 +310,40 @@ export function HelpModal({ isOpen, onClose }: HelpModalProps) {
             </div>
           </section>
 
+          <section>
+            <h3 className="text-sm font-semibold text-github-text-primary mb-2">Review Ladder</h3>
+            <div className="space-y-1">
+              <div className="flex justify-between text-sm">
+                <kbd className="px-2 py-1 bg-github-bg-tertiary border border-github-border rounded text-github-text-primary font-mono">
+                  &lt;
+                </kbd>
+                <span className="text-github-text-secondary">Previous rung (--ladder)</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <kbd className="px-2 py-1 bg-github-bg-tertiary border border-github-border rounded text-github-text-primary font-mono">
+                  &gt;
+                </kbd>
+                <span className="text-github-text-secondary">Next rung (--ladder)</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <kbd className="px-2 py-1 bg-github-bg-tertiary border border-github-border rounded text-github-text-primary font-mono">
+                  a
+                </kbd>
+                <span className="text-github-text-secondary">
+                  Approve / withdraw approval of the rung
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <kbd className="px-2 py-1 bg-github-bg-tertiary border border-github-border rounded text-github-text-primary font-mono">
+                  Cmd/Ctrl+Enter
+                </kbd>
+                <span className="text-github-text-secondary">
+                  In a comment: save and submit the review
+                </span>
+              </div>
+            </div>
+          </section>
+
           <div className="pt-4 border-t border-github-border lg:col-span-2">
             <p className="text-xs text-github-text-secondary">
               Shortcuts are disabled when typing in input fields.

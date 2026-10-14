@@ -11,6 +11,9 @@ interface CommentImportResponse {
   warnings?: string[];
 }
 
+// Each long poll stays under the server's cap; the loop keeps waiting.
+const WAIT_POLL_MS = 240_000;
+
 function handleCommandError(error: unknown, port: number): never {
   if (error instanceof TypeError && error.message.includes('fetch failed')) {
     console.error(`Error: Cannot connect to difit server on port ${port}. Is the server running?`);
@@ -87,10 +90,12 @@ export function createCommentCommand(): Command {
     .addOption(
       new Option('--format <format>', 'output format').choices(['text', 'json']).default('text'),
     )
-    .action(async (opts: { port: number; format: string }) => {
+    .option('--all', 'include resolved threads')
+    .action(async (opts: { port: number; format: string; all?: boolean }) => {
       try {
         const endpoint = opts.format === 'json' ? '/api/comments-json' : '/api/comments-output';
-        const response = await fetch(`http://localhost:${opts.port}${endpoint}`);
+        const status = opts.all ? 'all' : 'open';
+        const response = await fetch(`http://localhost:${opts.port}${endpoint}?status=${status}`);
 
         if (!response.ok) {
           console.error('Error: Failed to retrieve comments');
@@ -112,9 +117,49 @@ export function createCommentCommand(): Command {
     });
 
   comment
+    .command('wait')
+    .description(
+      'Block until the reviewer submits comments or finishes a review, then print the event as JSON',
+    )
+    .requiredOption('--port <port>', 'port of the running difit server', parseInt)
+    .option(
+      '--timeout <seconds>',
+      'give up after this many seconds (prints {"event":"timeout"})',
+      parseInt,
+    )
+    .action(async (opts: { port: number; timeout?: number }) => {
+      try {
+        const deadline =
+          opts.timeout !== undefined && opts.timeout > 0 ? Date.now() + opts.timeout * 1000 : null;
+        for (;;) {
+          const remaining =
+            deadline === null ? WAIT_POLL_MS : Math.min(WAIT_POLL_MS, deadline - Date.now());
+          if (remaining <= 0) {
+            console.log(JSON.stringify({ event: 'timeout' }));
+            return;
+          }
+          const response = await fetch(
+            `http://localhost:${opts.port}/api/review/wait?timeout=${remaining}`,
+          );
+          if (!response.ok) {
+            console.error('Error: Failed to wait for review events');
+            process.exit(1);
+          }
+          const event = (await response.json()) as { event?: string };
+          if (event.event !== 'timeout') {
+            console.log(JSON.stringify(event));
+            return;
+          }
+        }
+      } catch (error) {
+        handleCommandError(error, opts.port);
+      }
+    });
+
+  comment
     .command('resolve')
     .alias('remove')
-    .description('Resolve (remove) comment threads on a running difit server')
+    .description('Resolve comment threads on a running difit server (kept as resolved history)')
     .argument('<threadIds...>', 'thread IDs to resolve')
     .requiredOption('--port <port>', 'port of the running difit server', parseInt)
     .action(async (threadIds: string[], opts: { port: number }) => {
@@ -129,8 +174,8 @@ export function createCommentCommand(): Command {
               error?: string;
             }> => {
               const response = await fetch(
-                `http://localhost:${opts.port}/api/comments/${encodeURIComponent(threadId)}`,
-                { method: 'DELETE' },
+                `http://localhost:${opts.port}/api/comments/${encodeURIComponent(threadId)}/resolve`,
+                { method: 'POST' },
               );
 
               if (response.ok) {

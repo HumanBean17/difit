@@ -1,5 +1,7 @@
 import React, { useRef, useState } from 'react';
 
+import { useReviewActions } from '../contexts/ReviewActionsContext';
+
 import { CommentBodyRenderer, hasSuggestionInBody } from './CommentBodyRenderer';
 import type { AppearanceSettings } from './SettingsModal';
 import { SuggestionTemplateButton } from './SuggestionTemplateButton';
@@ -28,17 +30,18 @@ export function CommentForm({
   initialValue = '',
   embedded = false,
   title = 'Add a comment',
-  submitLabel = 'Submit',
+  submitLabel = 'Comment',
   placeholder = 'Leave a comment...',
 }: CommentFormProps) {
   const [body, setBody] = useState(initialValue);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mode, setMode] = useState<CommentFormMode>('edit');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { requestSubmit } = useReviewActions();
   const hasSuggestion = hasSuggestionInBody(body);
   const effectiveMode: CommentFormMode = hasSuggestion ? mode : 'edit';
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent, submitReview = false) => {
     e.preventDefault();
 
     if (!body.trim()) return;
@@ -48,6 +51,8 @@ export function CommentForm({
       await onSubmit(body.trim());
       setBody('');
       setMode('edit');
+      // Cmd/Ctrl+Enter saves and submits the review; the Save button only saves (pending).
+      if (submitReview) requestSubmit?.();
     } catch (error) {
       console.error('Failed to submit comment:', error);
     } finally {
@@ -57,7 +62,7 @@ export function CommentForm({
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      void handleSubmit(e);
+      void handleSubmit(e, true);
     } else if (e.key === 'Escape') {
       onCancel();
     }
@@ -163,8 +168,13 @@ export function CommentForm({
             e.currentTarget.style.borderColor = 'var(--color-yellow-btn-border)';
           }}
           disabled={!body.trim() || isSubmitting}
+          title={
+            requestSubmit
+              ? 'Save as pending · Cmd/Ctrl+Enter saves and submits the review'
+              : undefined
+          }
         >
-          {isSubmitting ? 'Submitting...' : submitLabel}
+          {isSubmitting ? 'Saving...' : submitLabel}
         </button>
       </div>
     </form>

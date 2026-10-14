@@ -11,10 +11,20 @@ interface FileWatchHook {
   watchState: ClientWatchState;
 }
 
+interface FileWatchOptions {
+  // Asked on each reload event; true reloads at once instead of showing the button.
+  shouldAutoReload?: () => boolean;
+  onReviewChanged?: () => void;
+}
+
 export function useFileWatch(
   onReload?: () => Promise<void>,
   onCommentsChanged?: () => Promise<void>,
+  options: FileWatchOptions = {},
 ): FileWatchHook {
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+  const autoReloadRef = useRef<() => void>(() => {});
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -75,6 +85,13 @@ export function useFileWatch(
                 lastChangeTime: new Date(),
                 lastChangeType: data.changeType,
               }));
+              if (optionsRef.current.shouldAutoReload?.()) {
+                autoReloadRef.current();
+              }
+              break;
+
+            case 'reviewChanged':
+              optionsRef.current.onReviewChanged?.();
               break;
 
             case 'error':
@@ -166,6 +183,10 @@ export function useFileWatch(
       }));
     }
   }, [onReload, watchState.isReloading]);
+  // The reload event fires before React re-renders; reach the latest handler via a ref.
+  autoReloadRef.current = () => {
+    void handleReload();
+  };
 
   const cleanup = () => {
     if (eventSourceRef.current) {

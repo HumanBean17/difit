@@ -4,6 +4,7 @@ export enum DiffMode {
   STAGED = 'staged', // HEAD vs staged
   DOT = 'dot', // HEAD vs working (all changes)
   SPECIFIC = 'specific', // commit vs commit (no watching)
+  LADDER = 'ladder', // review ladder: rungs of base..branch, follows the branch ref
 }
 
 type WatchChangeType = 'file' | 'commit' | 'staging';
@@ -38,11 +39,19 @@ interface CommentsChangedWatchEvent {
   timestamp: string;
 }
 
+// Session state outside the comment list changed: pending count, approvals, finish.
+interface ReviewChangedWatchEvent {
+  type: 'reviewChanged';
+  finished?: boolean;
+  timestamp: string;
+}
+
 export type WatchEvent =
   | ConnectedWatchEvent
   | ReloadWatchEvent
   | ErrorWatchEvent
-  | CommentsChangedWatchEvent;
+  | CommentsChangedWatchEvent
+  | ReviewChangedWatchEvent;
 
 export interface ClientWatchState {
   isWatchEnabled: boolean;

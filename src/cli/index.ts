@@ -90,6 +90,7 @@ interface CliOptions {
   background?: boolean;
   context?: number;
   mergeBase?: boolean;
+  ladder?: string;
 }
 
 const program = new Command();
@@ -128,6 +129,10 @@ program
     '--merge-base',
     'resolve the base revision with git merge-base before diffing (Git revision mode only)',
   )
+  .option(
+    '--ladder <base>',
+    'review ladder: step the commits of merge-base(base, branch)..branch, following the branch as it is rewritten (commit-ish names the branch; default: current)',
+  )
   .action(async (commitish: string, compareWith: string | undefined, options: CliOptions) => {
     try {
       const isBackgroundChild = process.env[BACKGROUND_CHILD_ENV] === '1';
@@ -163,6 +168,11 @@ program
       if (backgroundMode) {
         options.keepAlive = true;
         options.open = false;
+      }
+
+      if (options.ladder !== undefined) {
+        await runLadderSession(commitish, compareWith, options, backgroundMode, isBackgroundChild);
+        return;
       }
 
       if (options.pr) {
@@ -355,6 +365,60 @@ program
   });
 
 void program.parseAsync();
+
+async function runLadderSession(
+  commitish: string,
+  compareWith: string | undefined,
+  options: CliOptions,
+  backgroundMode: boolean,
+  isBackgroundChild: boolean,
+): Promise<void> {
+  const base = options.ladder ?? '';
+  if (!base.trim()) {
+    console.error('Error: --ladder needs a base, e.g. --ladder main');
+    process.exit(1);
+  }
+  if (compareWith || options.pr || options.mergeBase) {
+    console.error('Error: --ladder cannot be combined with compare-with, --pr or --merge-base');
+    process.exit(1);
+  }
+
+  let repoPath: string;
+  try {
+    repoPath = getGitRoot();
+  } catch {
+    console.error('Error: --ladder must run inside a git repository');
+    process.exit(1);
+  }
+
+  const { url, port, isEmpty } = await startServer({
+    ladder: { base, commitish },
+    preferredPort: options.port,
+    host: options.host,
+    openBrowser: options.open,
+    keepAlive: options.keepAlive,
+    contextLines: options.context,
+    diffMode: DiffMode.LADDER,
+    repoPath,
+  });
+
+  if (backgroundMode) {
+    emitBackgroundHandshake({ port, url, pid: process.pid });
+    if (isBackgroundChild) {
+      ignoreStdioErrorsForBackgroundDaemon();
+    }
+    return;
+  }
+
+  console.log(`\n🚀 difit server started on ${url}`);
+  console.log(
+    `🪜 Reviewing ladder ${commitish === 'HEAD' ? 'of current branch' : commitish} on ${base}`,
+  );
+  if (isEmpty) {
+    console.log('\n! \x1b[33mThe ladder has no commits yet.\x1b[0m');
+  }
+  console.log('\nPress Ctrl+C to stop the server');
+}
 
 async function handleUntrackedFiles(git: SimpleGit, addAutomatically?: boolean): Promise<void> {
   const files = await findUntrackedFiles(git);
