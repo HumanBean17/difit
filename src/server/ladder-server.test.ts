@@ -1,5 +1,6 @@
-import { existsSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { type Server } from 'http';
+import { join } from 'path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -67,6 +68,15 @@ describe('difit --ladder server', () => {
       messages: [{ id, body: 'Rename this', author: 'User', createdAt: now, updatedAt: now }],
     };
   };
+
+  it('records its port and pid in the state file for reattaching', async () => {
+    const gitDir = join(repo.path, '.git', 'difit');
+    const [stateFile] = readdirSync(gitDir).filter((name) => name.endsWith('.json'));
+    const state = JSON.parse(readFileSync(join(gitDir, stateFile!), 'utf8')) as {
+      server?: { port: number; pid: number; url: string };
+    };
+    expect(state.server).toEqual({ port: Number(new URL(base).port), pid: process.pid, url: base });
+  });
 
   it('reports ladder mode, rungs, and opens on rung 1', async () => {
     const session = await json<SessionInfo>('/api/session');

@@ -1419,6 +1419,8 @@ export async function startServer(
     options.host || 'localhost',
   );
 
+  ladder?.setServer({ port, pid: process.pid, url });
+
   // Security warning for non-localhost binding
   if (options.host && options.host !== '127.0.0.1' && options.host !== 'localhost') {
     console.warn('\n⚠️  WARNING: Server is accessible from external network!');

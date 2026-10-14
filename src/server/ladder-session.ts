@@ -49,6 +49,14 @@ interface LadderStateFile {
   approvals: Record<string, ApprovalRecord>;
   submittedMessageIds: string[];
   lastRewrite?: LadderInfo['lastRewrite'];
+  // The difit serving this session, so an agent can reattach instead of relaunching.
+  server?: LadderServerInfo;
+}
+
+interface LadderServerInfo {
+  port: number;
+  pid: number;
+  url: string;
 }
 
 type DiffLoader = (selection: DiffSelection) => Promise<DiffResponse>;
@@ -82,6 +90,7 @@ export class LadderSession {
   private tags: Record<string, ThreadLadderTag>;
   private approvals: Record<string, ApprovalRecord>;
   private lastRewrite: LadderInfo['lastRewrite'];
+  private server: LadderServerInfo | undefined;
   private readonly createdAt: string;
   private readonly patchIds = new Map<string, string | null>();
   private finished = false;
@@ -132,6 +141,11 @@ export class LadderSession {
     await session.refresh();
     session.persist();
     return session;
+  }
+
+  setServer(server: LadderServerInfo): void {
+    this.server = server;
+    this.persist();
   }
 
   get isFinished(): boolean {
@@ -545,6 +559,7 @@ export class LadderSession {
       approvals: this.approvals,
       submittedMessageIds: this.events.submittedIds(),
       ...(this.lastRewrite ? { lastRewrite: this.lastRewrite } : {}),
+      ...(this.server ? { server: this.server } : {}),
     };
     mkdirSync(dirname(this.statePath), { recursive: true });
     const tmpPath = `${this.statePath}.tmp`;
